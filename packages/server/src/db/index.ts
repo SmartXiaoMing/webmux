@@ -50,7 +50,3 @@ export function setSetting(db: DB, key: string, value: string): void {
     'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
   ).run(key, value)
 }
-
-export function deleteSetting(db: DB, key: string): void {
-  db.prepare('DELETE FROM settings WHERE key = ?').run(key)
-}

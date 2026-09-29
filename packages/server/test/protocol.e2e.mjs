@@ -89,6 +89,15 @@ class Client {
 
   connect() {
     return new Promise((resolve, reject) => {
+      // Settles once and stops the timeout either way. Left running, the timer
+      // would hold the process open for its full term and reject a promise that
+      // has already resolved.
+      let timeout
+      const settle = (fn, value) => {
+        clearTimeout(timeout)
+        fn(value)
+      }
+      timeout = setTimeout(() => settle(reject, new Error('attach timed out')), 10_000)
       this.ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws/terminal`, {
         headers: { cookie, origin: BASE },
       })
@@ -116,17 +125,16 @@ class Client {
           this.syncedSeq = msg.seq
           this.bytesSinceSync = 0
           this.hasSynced = true
-          resolve(msg)
+          settle(resolve, msg)
         }
-        if (msg.t === 'error') reject(new Error(`server error: ${msg.code} ${msg.message}`))
+        if (msg.t === 'error') settle(reject, new Error(`server error: ${msg.code} ${msg.message}`))
         if (msg.t === 'exit') this._resolveExit(msg)
       })
       this.ws.on('close', (code, reason) => {
         this.closeCode = code
         this.closeReason = reason.toString()
       })
-      this.ws.on('error', reject)
-      setTimeout(() => reject(new Error('attach timed out')), 10_000)
+      this.ws.on('error', (err) => settle(reject, err))
     })
   }
 
@@ -462,6 +470,38 @@ describe('terminal sessions', () => {
     } finally {
       rmSync(scratch, { recursive: true, force: true })
     }
+  })
+
+  it('tells every attached client when the shell exits', async () => {
+    // Its own session: exiting the shell ends it, so this cannot share the one
+    // the rest of this block uses.
+    const created = await api('/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'exit-frame' }),
+    })
+    const id = created.body.id
+
+    // Two clients, because the frame has to reach all of them — a tab left
+    // open in another browser should not go on showing a dead prompt.
+    const first = new Client(id)
+    await first.connect()
+    const second = new Client(id)
+    await second.connect()
+
+    first.write('exit\r')
+
+    const [a, b] = await Promise.all([first.exited, second.exited])
+    assert.equal(a.t, 'exit')
+    assert.equal(b.t, 'exit')
+    assert.equal(typeof a.code, 'number')
+
+    // And it is gone from the registry, not merely dead. This is also what
+    // exercises the disposal on the exit path.
+    const list = await api('/api/sessions')
+    assert.equal(
+      list.body.find((s) => s.id === id),
+      undefined,
+    )
   })
 
   it('kills the session and removes the tmux session', async () => {

@@ -9,7 +9,12 @@
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { forwardedHeaderWarning, isLoopbackHost, plaintextWarning } from '../src/config.ts'
+import {
+  forwardedHeaderWarning,
+  isLoopbackHost,
+  plaintextWarning,
+  unclaimedWarning,
+} from '../src/config.ts'
 import { insecureCookieWarning } from '../src/auth/routes.ts'
 
 describe('loopback detection', () => {
@@ -43,6 +48,24 @@ describe('the plaintext listener warning', () => {
       // The mitigations have to be in the message, or it is just noise.
       assert.match(warning, /TLS|WireGuard|127\.0\.0\.1/)
     }
+  })
+})
+
+describe('the unclaimed-instance warning', () => {
+  it('stays quiet on loopback, where nobody else can reach setup', () => {
+    assert.equal(unclaimedWarning('127.0.0.1'), null)
+    assert.equal(unclaimedWarning('::1'), null)
+  })
+
+  it('fires for the default bind, because that is now 0.0.0.0', () => {
+    // The whole point of the warning: the default changed to an exposed
+    // address, so on a fresh install there is a window in which anyone who can
+    // reach the port can claim the instance. Verified against a real boot —
+    // both this and the plaintext warning appear before setup is complete.
+    const warning = unclaimedWarning('0.0.0.0')
+    assert.ok(warning)
+    assert.match(warning, /claim/)
+    assert.match(warning, /127\.0\.0\.1/)
   })
 })
 

@@ -1,6 +1,7 @@
 {
   "name": "webmux",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "description": "Browser terminal with tmux-style session persistence, plus file management and share links",

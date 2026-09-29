@@ -137,8 +137,17 @@ export interface ExitMessage {
   signal?: number
 }
 
+/**
+ * Codes a running socket can be told about.
+ *
+ * Deliberately no `unauthorized`: authentication is settled at the upgrade, and
+ * a rejected upgrade is an HTTP 401 the browser cannot read the status of — it
+ * reports every failed handshake as close code 1006. So an expired session
+ * surfaces on the next `/api/sessions` poll, which sees the same 401 and signs
+ * the client out. Leaving the code in this union would invite a handler for a
+ * frame the server has no way to deliver.
+ */
 export type ErrorCode =
-  | 'unauthorized'
   | 'session_not_found'
   | 'session_limit'
   | 'bad_message'
@@ -191,18 +200,6 @@ export const WS_PATH = '/ws/terminal'
 export const WS_CLOSE = {
   /** Normal client-initiated close; do not reconnect. */
   NORMAL: 1000,
-  /**
-   * Auth failed at upgrade; reconnecting will not help until re-login.
-   *
-   * Reserved, and currently unreachable: the gateway rejects an
-   * unauthenticated upgrade with an HTTP 401, and a browser reports a failed
-   * WebSocket handshake as 1006 regardless of the status code — it cannot read
-   * it. Emitting this instead would mean completing the handshake only to close
-   * it, which puts an await in front of the gateway's message wiring. The
-   * client compensates by recovering on the next `/api/sessions` poll, which
-   * sees the same 401. Do not rely on this code arriving.
-   */
-  UNAUTHORIZED: 4001,
   /** Server is shutting down; reconnect with backoff. */
   SHUTTING_DOWN: 4002,
   /**

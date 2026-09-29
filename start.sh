@@ -49,9 +49,38 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 ok "tmux $(tmux -V | awk '{print $2}')"
 
-if [ ! -d node_modules ]; then
-  die "依赖未安装，请先运行 pnpm install"
+has_pnpm() {
+  command -v pnpm >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# Dependencies
+#
+# Installed rather than merely checked, so a fresh clone and a `git pull` that
+# changed the lockfile both work with one command. The postinstall hook
+# (scripts/fix-pty-permissions.mjs) is part of why this has to run at all —
+# node-pty's helper is useless without its execute bit, and forgetting that
+# step fails at the first terminal, not at startup.
+# ---------------------------------------------------------------------------
+
+needs_install() {
+  [ -d node_modules ] || return 0
+  # A lockfile newer than the installed tree means the previous install is not
+  # what this checkout asks for.
+  [ pnpm-lock.yaml -nt node_modules ] 2>/dev/null
+}
+
+if needs_install; then
+  step "安装依赖…"
+  if ! has_pnpm; then
+    die "找不到 pnpm。安装方式：corepack enable pnpm（Node 自带），或 npm i -g pnpm"
+  fi
+  pnpm install || die "依赖安装失败"
+  ok "依赖已安装"
+else
+  ok "依赖已安装（跳过）"
 fi
+
 
 # ---------------------------------------------------------------------------
 # Client build
@@ -74,7 +103,7 @@ needs_build() {
 
 if needs_build; then
   step "前端需要构建…"
-  command -v pnpm >/dev/null 2>&1 || die "找不到 pnpm，无法构建前端"
+  has_pnpm || die "找不到 pnpm，无法构建前端"
   pnpm build || die "前端构建失败"
   ok "前端构建完成"
 else

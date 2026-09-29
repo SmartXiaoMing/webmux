@@ -206,6 +206,29 @@ export function plaintextWarning(host: string): string | null {
  * Binding to loopback makes the two mutually exclusive, which is why the
  * recommended deployment has the reverse proxy connect over 127.0.0.1.
  */
+/**
+ * The first-run warning for a listen address, or null.
+ *
+ * `/api/auth/setup` refuses only once a password exists, so between the first
+ * start and the moment the operator completes setup, an instance on a
+ * reachable address can be claimed by whoever gets there first — and the
+ * default bind is now 0.0.0.0. On a machine with a public address that window
+ * is measured in seconds, because scanners find new listeners quickly.
+ *
+ * Not a refusal: setup genuinely has to happen over the network on a headless
+ * box. It just has to be done deliberately, and before the port is reachable
+ * from anywhere untrusted.
+ */
+export function unclaimedWarning(host: string): string | null {
+  if (isLoopbackHost(host)) return null
+  return (
+    `no password set yet and this port is reachable from the network: until you ` +
+    `complete setup, anyone who can reach ${host} can claim this instance and ` +
+    `choose its password. Finish setup now, or restart with WEBMUX_HOST=127.0.0.1 ` +
+    `and set it over loopback.`
+  )
+}
+
 export function forwardedHeaderWarning(host: string, trustProxy: boolean): string | null {
   if (!trustProxy || isLoopbackHost(host)) return null
   return (
@@ -268,7 +291,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const shell = e.WEBMUX_SHELL ?? file.shell ?? env.SHELL ?? '/bin/bash'
 
   const config: Config = {
-    host: e.WEBMUX_HOST ?? file.host ?? '127.0.0.1',
+    // 0.0.0.0 by default so a container port mapping or a reverse proxy on
+    // another host works without configuration. It is also the exposed case:
+    // the server speaks plain HTTP, so the boot warnings below exist to make
+    // sure that is a decision rather than an accident. Set WEBMUX_HOST=127.0.0.1
+    // when a proxy on the same host connects over loopback.
+    host: e.WEBMUX_HOST ?? file.host ?? '0.0.0.0',
     port: e.WEBMUX_PORT ?? file.port ?? 8080,
     dataDir: path.resolve(e.WEBMUX_DATA_DIR ?? file.dataDir ?? dataDir),
     shell,

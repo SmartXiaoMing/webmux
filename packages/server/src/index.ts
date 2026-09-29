@@ -4,7 +4,7 @@ import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } fr
 import cookie from '@fastify/cookie'
 import fastifyStatic from '@fastify/static'
 import websocket from '@fastify/websocket'
-import { forwardedHeaderWarning, loadConfig, plaintextWarning } from './config'
+import { forwardedHeaderWarning, loadConfig, plaintextWarning, unclaimedWarning } from './config'
 import { openDatabase } from './db/index'
 import { logger } from './logger'
 import { getOrCreateSecret } from './auth/tokens'
@@ -199,7 +199,12 @@ async function main(): Promise<void> {
   }
 
   if (!isInitialized(db)) {
-    log.info(`no password set yet — open ${url} to complete setup`)
+    // Raised to a warning when the port is reachable from off the machine: an
+    // unclaimed instance on a reachable address is claimable by anyone, which
+    // is a different thing from "you have not got round to it yet".
+    const unclaimed = unclaimedWarning(config.host)
+    if (unclaimed !== null) log.warn(unclaimed)
+    else log.info(`no password set yet — open ${url} to complete setup`)
   }
 
   let shuttingDown = false

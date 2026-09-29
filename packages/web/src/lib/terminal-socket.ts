@@ -124,11 +124,12 @@ export class TerminalSocket {
       this.ws = null
       if (this.disposed) return
 
-      if (event.code === WS_CLOSE.UNAUTHORIZED) {
-        this.handlers.onStatus('closed', '登录已失效')
-        this.handlers.onFatal('登录已失效，请重新登录')
-        return
-      }
+      // No branch for "the session expired": an unauthenticated upgrade is
+      // refused with an HTTP 401, and the browser reports every failed
+      // handshake as 1006 without the status code. That case is caught by the
+      // session-list poll, which gets its own 401 and signs the user out — so
+      // reconnecting here is harmless, just redundant for a few seconds.
+
       if (event.code === WS_CLOSE.NORMAL) {
         this.handlers.onStatus('closed')
         return
@@ -179,7 +180,7 @@ export class TerminalSocket {
 
       case 'error':
         // A missing session is terminal; anything else is worth a retry.
-        if (msg.code === 'session_not_found' || msg.code === 'unauthorized') {
+        if (msg.code === 'session_not_found') {
           this.handlers.onStatus('closed', msg.message)
           this.handlers.onFatal(msg.message)
         }
