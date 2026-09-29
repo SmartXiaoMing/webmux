@@ -205,9 +205,23 @@ location / {
 curl -fsSL https://raw.githubusercontent.com/SmartXiaoMing/webmux/main/install.sh | sudo bash
 ```
 
-已经 clone 下来的话，在仓库里跑 `sudo ./install.sh` 也一样。常用参数：
-`--prefix /opt/webmux`、`--user webmux`、`--port 8866`、`--no-deps`（只检查依赖）、
-`--uninstall`。脚本是幂等的 —— 重跑就是就地升级。
+已经 clone 下来的话，在仓库里跑 `sudo ./install.sh` 也一样。
+
+**它默认以「你」的身份运行服务**（`sudo` 的那个调用者），不是建一个专用账号 ——
+这正是重点：你在浏览器里拿到的就是**你自己的 shell**，同样的家目录、dotfiles、
+SSH 密钥、项目文件。用一个专用账号会把你丢进一个空的家目录，然后让你逐个授权
+那些你本来就该直接能访问的东西。
+
+文件页的根目录默认就是**你的家目录**，并且会被显式写进
+`~/.local/share/webmux/config.json`（而不是依赖隐式默认值）。要改：
+
+```bash
+sudo ./install.sh --root /srv/data --root /home/me      # 两个根，可重复
+```
+
+常用参数：`--prefix /opt/webmux`、`--user <用户名>`、`--root <目录>`（可重复）、
+`--port 8866`、`--data-dir <目录>`、`--no-deps`（只检查依赖）、`--uninstall`。
+脚本是幂等的 —— 重跑就是就地升级，且**不会覆盖你已经改过的 config.json**。
 
 管道运行时参数要写在 `bash -s --` 之后（否则 bash 会把它们当成自己的参数）：
 
@@ -229,18 +243,15 @@ sudo apt install -y nodejs tmux git
 sudo corepack enable pnpm
 ```
 
-**2. 建一个专用用户**，且**必须有真实存在的家目录** —— 数据目录默认在
-`~/.local/share/webmux`，家目录不存在会直接启动失败：
+**2. 想好用哪个账号。** 就用你自己（推荐，也是 install.sh 的默认值）——
+浏览器里开出来的就是你的 shell。专用账号只在你确实想隔离时才有意义，
+而且它**必须有真实存在的家目录**，否则数据目录建不出来、服务直接起不来。
+
+**3. 拉代码并以那个身份跑一次**（装依赖、构建前端、设好密码）：
 
 ```bash
-sudo useradd --create-home --shell /bin/bash webmux
-```
-
-**3. 拉代码并以该用户身份跑一次**（装依赖、构建前端、设好密码）：
-
-```bash
-sudo -u webmux git clone https://github.com/SmartXiaoMing/webmux /opt/webmux
-cd /opt/webmux && sudo -u webmux ./start.sh
+sudo -u "$USER" git clone https://github.com/SmartXiaoMing/webmux /opt/webmux
+cd /opt/webmux && sudo -u "$USER" ./start.sh
 ```
 
 看到 `listening on http://…` 就说明没问题，`Ctrl-C` 停掉。
@@ -253,8 +264,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now webmux
 ```
 
-代码不在 `/opt/webmux`、或用户名不叫 `webmux` 时，改单元文件里的
+代码不在 `/opt/webmux`、或想换个账号时，改单元文件里的
 `User=` / `Group=` / `WorkingDirectory=` / `ExecStart=`。
+`Group=` 要写该用户的**主组**（`id -gn <用户>`），不是同名组 ——
+两者在不少系统上并不一样，而 `User=x` 配一个不存在的 `Group=x` 是个起不来的单元。
 
 **5. 看它活着没有**：
 

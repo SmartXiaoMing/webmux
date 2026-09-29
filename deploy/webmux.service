@@ -7,10 +7,14 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now webmux
 #
-# Adjust User=, Group= and WorkingDirectory= to match where you installed it.
-# That user must own the checkout, and it must have a real home directory: the
-# data directory defaults to `~/.local/share/webmux` (Linux) and is created 0700
-# because it holds both the password hash and the token-signing secret.
+# User= and Group= are the account the shells will run as. Use your own: the
+# point of this thing is that the terminal in the browser is *your* terminal —
+# same home, same dotfiles, same keys. Group= must be that user's *primary*
+# group (`id -gn <user>`), which is not always a group of the same name.
+#
+# That user must own the checkout and have a real home directory: the data
+# directory defaults to `~/.local/share/webmux` (Linux) and is created 0700
+# because it holds the password hash and the token-signing secret.
 
 [Unit]
 Description=webmux — browser terminal with tmux-backed session persistence
