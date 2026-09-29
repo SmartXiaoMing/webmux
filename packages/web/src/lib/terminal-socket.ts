@@ -28,6 +28,26 @@ const BASE_RECONNECT_MS = 500
 const MAX_RECONNECT_MS = 15_000
 
 /**
+ * Bounds on keystrokes held while the socket cannot carry them.
+ *
+ * Output has a ring buffer and a replay protocol so a reconnect loses nothing.
+ * Input had no such thing: `send` dropped whatever was typed while the socket
+ * was down, and a dropped Backspace with the characters around it still
+ * delivered turns "fix a typo" into a different command.
+ *
+ * The queue is all-or-nothing — expiring or overflowing discards the *whole*
+ * thing rather than the oldest entries, because a prefix is not a smaller
+ * version of what was typed: dropping `rm -rf ` and delivering `/tmp/x` runs a
+ * command the user never wrote. An outage that outlasts the TTL therefore
+ * loses the keystrokes outright, exactly as it did before this existed, but it
+ * can no longer lose *part* of a command.
+ */
+const MAX_PENDING_INPUT_BYTES = 64 * 1024
+const PENDING_INPUT_MAX_AGE_MS = 5_000
+
+const textEncoder = new TextEncoder()
+
+/**
  * Delay after a `TOO_SLOW` close, which skips the backoff but must not skip the
  * wait entirely.
  *
@@ -65,9 +85,22 @@ export class TerminalSocket {
   private cols = 80
   private rows = 24
 
+  /**
+   * True once the server has acknowledged the attach. Deliberately not "the
+   * socket is open": the server accepts an `attach` frame, then resolves a
+   * resize and only then starts (or finds) the pty, so input sent in between
+   * arrives before there is anything to write it to.
+   */
+  private ready = false
+
+  private pendingInput: Array<{ data: string; at: number }> = []
+  private pendingInputBytes = 0
+
   constructor(
     private readonly sessionId: string,
     private readonly handlers: TerminalSocketHandlers,
+    /** Injectable so tests can drive the staleness window without sleeping. */
+    private readonly now: () => number = Date.now,
   ) {}
 
   /** Current consumed offset, or undefined if nothing has been synced yet. */
@@ -122,6 +155,7 @@ export class TerminalSocket {
 
     socket.onclose = (event) => {
       this.ws = null
+      this.ready = false
       if (this.disposed) return
 
       // No branch for "the session expired": an unauthenticated upgrade is
@@ -155,6 +189,12 @@ export class TerminalSocket {
   private handleControl(msg: ServerMessage): void {
     switch (msg.t) {
       case 'attached':
+        // The server is now writing to a pty, so held keystrokes have
+        // somewhere to go. Flushing here rather than on `open` is what keeps
+        // them in order: a key typed between `open` and `attached` would
+        // otherwise overtake everything queued while the socket was down.
+        this.ready = true
+        this.flushPendingInput()
         break
 
       case 'resync':
@@ -226,8 +266,44 @@ export class TerminalSocket {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg))
   }
 
+  /**
+   * Delivers a keystroke, holding it if the socket cannot carry it yet.
+   *
+   * The `pendingInput.length === 0` clause in the fast path is load-bearing:
+   * without it, a key typed after the socket opens but before `attached`
+   * would be sent immediately and overtake keys still queued from the outage.
+   */
   write(data: string): void {
-    this.send({ t: 'input', data })
+    if (this.ready && this.ws?.readyState === WebSocket.OPEN && this.pendingInput.length === 0) {
+      this.send({ t: 'input', data })
+      return
+    }
+    this.enqueueInput(data)
+  }
+
+  private enqueueInput(data: string): void {
+    if (this.disposed) return
+    this.pendingInput.push({ data, at: this.now() })
+    this.pendingInputBytes += textEncoder.encode(data).byteLength
+    if (this.pendingInputBytes > MAX_PENDING_INPUT_BYTES) this.clearPendingInput()
+  }
+
+  private flushPendingInput(): void {
+    if (this.pendingInput.length === 0) return
+    const oldest = this.pendingInput[0]
+    if (oldest !== undefined && this.now() - oldest.at > PENDING_INPUT_MAX_AGE_MS) {
+      this.clearPendingInput()
+      return
+    }
+    const queued = this.pendingInput
+    this.pendingInput = []
+    this.pendingInputBytes = 0
+    for (const item of queued) this.send({ t: 'input', data: item.data })
+  }
+
+  private clearPendingInput(): void {
+    this.pendingInput = []
+    this.pendingInputBytes = 0
   }
 
   /**
@@ -244,6 +320,9 @@ export class TerminalSocket {
 
   dispose(): void {
     this.disposed = true
+    // A deliberate close must not deliver keystrokes the user typed into a
+    // terminal they were leaving.
+    this.clearPendingInput()
     this.clearTimer()
     const socket = this.ws
     this.ws = null

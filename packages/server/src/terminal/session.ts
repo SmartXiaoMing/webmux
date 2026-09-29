@@ -31,6 +31,19 @@ const LOW_WATER_BYTES = 1024 * 1024
 const SNAPSHOT_SCROLLBACK_LINES = 3000
 
 /**
+ * Ceiling on keystrokes held while the pty is still coming up.
+ *
+ * `attach` sets `connection.session` on the gateway before `ensureStarted()`
+ * has resolved, so input can legitimately arrive while there is no pty to
+ * write it to. Dropping it there is how a Backspace disappears while the
+ * characters after it still land. The window is bounded by spawning
+ * `tmux attach`, so the buffer only ever holds what was typed in that window;
+ * the cap is a backstop, and on overflow the whole buffer goes rather than a
+ * prefix of it — half a command is worse than none.
+ */
+const MAX_PENDING_INPUT_BYTES = 256 * 1024
+
+/**
  * A client attached to a session. Deliberately a dumb transport — all protocol
  * state (sequence offsets, sync status) lives in the Session so there is
  * exactly one place that can get the replay/resync bookkeeping wrong.
@@ -98,6 +111,10 @@ export class Session {
   private pty: IPty | null = null
   private starting: Promise<void> | null = null
   private disposed = false
+
+  /** Keystrokes that arrived before the pty existed; flushed in `start()`. */
+  private pendingInput: string[] = []
+  private pendingInputBytes = 0
 
   private readonly mirror: HeadlessTerminal
   private readonly serializer: Serializer
@@ -215,6 +232,10 @@ export class Session {
     pty.onData((chunk) => this.handleData(chunk))
     pty.onExit(({ exitCode, signal }) => this.handleExit(exitCode, signal))
 
+    // After the handlers are wired, so the shell's echo of these keystrokes is
+    // captured like any other output.
+    this.flushPendingInput()
+
     log.info(`session ${this.id} attached (${this.cols}x${this.rows})`)
   }
 
@@ -270,6 +291,9 @@ export class Session {
     // run.
     for (const resolve of this.writeWaiters) resolve()
     this.writeWaiters = []
+
+    // Nothing will ever flush these now, and they are the user's keystrokes.
+    this.clearPendingInput()
 
     try {
       this.pty?.kill()
@@ -436,8 +460,40 @@ export class Session {
   // -------------------------------------------------------------------------
 
   write(data: string): void {
-    if (!this.pty || this.disposed) return
+    if (this.disposed) return
+    if (!this.pty) {
+      this.enqueuePendingInput(data)
+      return
+    }
     this.pty.write(data)
+  }
+
+  private enqueuePendingInput(data: string): void {
+    this.pendingInput.push(data)
+    this.pendingInputBytes += Buffer.byteLength(data, 'utf8')
+    if (this.pendingInputBytes > MAX_PENDING_INPUT_BYTES) {
+      log.warn(`session ${this.id} dropped ${this.pendingInputBytes} byte(s) of input typed before its pty was ready`)
+      this.clearPendingInput()
+    }
+  }
+
+  private flushPendingInput(): void {
+    if (this.pendingInput.length === 0) return
+    const queued = this.pendingInput
+    this.clearPendingInput()
+    if (!this.pty) return
+    try {
+      for (const data of queued) this.pty.write(data)
+    } catch (err: unknown) {
+      // The pty died between the check and the write. Losing these keystrokes
+      // is unavoidable; failing the attach over them is not.
+      log.warn(`session ${this.id} could not flush pending input: ${(err as Error).message}`)
+    }
+  }
+
+  private clearPendingInput(): void {
+    this.pendingInput = []
+    this.pendingInputBytes = 0
   }
 
   async resize(cols: number, rows: number): Promise<void> {

@@ -115,8 +115,8 @@ async function stopServer() {
 }
 
 /** Text currently rendered by the terminal, read out of xterm's own buffer. */
-async function terminalText() {
-  return page.evaluate(() => {
+async function terminalText(target = page) {
+  return target.evaluate(() => {
     const term = window.__webmuxTerm
     if (!term) return ''
     const buffer = term.buffer.active
@@ -128,11 +128,11 @@ async function terminalText() {
   })
 }
 
-async function waitForTerminalText(needle, timeoutMs = 30_000) {
+async function waitForTerminalText(needle, timeoutMs = 30_000, target = page) {
   const deadline = Date.now() + timeoutMs
   let last = ''
   while (Date.now() < deadline) {
-    last = await terminalText()
+    last = await terminalText(target)
     if (last.includes(needle)) return last
     await delay(200)
   }
@@ -476,6 +476,22 @@ describe('webmux in a browser', () => {
     // The accessory key bar is the difference between usable and not on a phone.
     await mobile.waitForSelector('button:has-text("Ctrl")')
     await mobile.waitForSelector('button:has-text("Esc")')
+
+    // Backspace from the bar, exercised the way a phone would: type, erase,
+    // keep typing. A soft keyboard's own backspace travels through the IME's
+    // compose machinery, where it can be swallowed without a byte ever
+    // reaching the tty; this key bypasses that entirely, so what is asserted
+    // here is that the byte arrives and the shell acts on it.
+    await mobile.waitForFunction(() => window.__webmuxStatus === 'ready', { timeout: 40_000 })
+    await mobile.click('.xterm')
+    await mobile.keyboard.type('echo XYc')
+    await mobile.locator('button[title="退格（Backspace）"]').click()
+    // The button took the focus, so the keyboard has to go back first.
+    await mobile.click('.xterm')
+    await mobile.keyboard.type('Z')
+    await mobile.keyboard.press('Enter')
+    // `XYcZ` would mean the erase never happened.
+    await waitForTerminalText('XYZ', 20_000, mobile)
 
     // The quick-key editor's trigger sits outside the bar's horizontal
     // scroller, so it must be on screen without swiping — which is the whole

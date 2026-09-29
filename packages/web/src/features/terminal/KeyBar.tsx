@@ -31,6 +31,11 @@ const KEYS: Array<{ label: string; seq: string; title: string }> = [
   // return is swallowed by the app shell — and CR, not LF, for the reason
   // spelled out on `macroSequence`.
   { label: 'Enter', seq: '\r', title: '回车（Enter）' },
+  // DEL, not BS: it is what xterm sends for Backspace and what the pane's
+  // `erase` is set to, so it is the byte that actually deletes. This is also
+  // the only reliable delete on a phone — a soft keyboard's own Backspace goes
+  // through the IME's compose machinery, where it can be swallowed.
+  { label: '⌫', seq: '\x7f', title: '退格（Backspace）' },
   { label: 'Esc', seq: '\x1b', title: 'Escape' },
   { label: 'Tab', seq: '\t', title: 'Tab' },
   { label: '↑', seq: '\x1b[A', title: 'Up' },
