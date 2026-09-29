@@ -96,18 +96,92 @@ export class TmuxBackend implements SessionBackend {
   }
 
   /**
+   * Whether a tmux server is currently running on our socket.
+   *
+   * Any command would answer this, but this one is cheapest and has no side
+   * effects.
+   */
+  private async serverAlive(): Promise<boolean> {
+    try {
+      await this.run('show-options', '-s', 'exit-empty')
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * Starts the tmux server if needed and applies options. Idempotent — safe to
    * call on every session creation, which also repairs options if an operator
    * has been poking at the server by hand.
+   *
+   * The memo is revalidated rather than trusted, because the server can die at
+   * any time — a reboot, a crash, `tmux kill-server` — and the next
+   * `new-session` would then quietly resurrect one with every option back at
+   * its default.
    */
-  private ensureServer(): Promise<void> {
-    this.serverReady ??= (async () => {
-      await this.run('start-server')
-      await this.setOptions(WINDOW_SESSION_OPTIONS, '-g')
+  private async ensureServer(): Promise<void> {
+    if (this.serverReady !== null && (await this.serverAlive())) return this.serverReady
+    this.serverReady = null
+
+    this.serverReady = (async () => {
+      /*
+       * `exit-empty` goes off in the *same* invocation that starts the server,
+       * and it has to come first.
+       *
+       * It defaults to on, which means a server started with no sessions exits
+       * immediately. `start-server` returns 0 having done exactly that, so
+       * every `set-option` below would run against a server that is already
+       * gone, fail, and be logged only at debug — and then the first
+       * `new-session` would start a fresh server with the entire configuration
+       * missing. The symptoms are all quiet: tmux's status bar comes back and
+       * steals the bottom line of every terminal, Esc waits 500 ms in vim, and
+       * scrollback drops to the 2000-line default.
+       */
+      await this.run('start-server', ';', 'set-option', '-s', 'exit-empty', 'off')
+
+      // `default-shell` belongs to the session scope, not the server scope, and
+      // getting that wrong is not a cosmetic difference: `set-option -s
+      // default-shell ...` fails with "no current session" — which, at debug
+      // level, is invisible — and every session then starts in whatever shell
+      // tmux picked rather than the configured one.
+      const sessionOptions: Array<[string, string]> = [
+        ...WINDOW_SESSION_OPTIONS,
+        ['default-shell', this.opts.shell],
+      ]
+      await this.setOptions(sessionOptions, '-g')
       await this.setOptions(SERVER_OPTIONS, '-s')
       await this.setServerOption('default-terminal', 'tmux-256color')
       await this.setServerOption('terminal-overrides', ',*:Tc') // advertise truecolor
-      await this.setServerOption('default-shell', this.opts.shell)
+
+      /*
+       * Read back what was just set.
+       *
+       * A single option failing above is tolerable — names and scopes drift
+       * between tmux versions — which is why those calls only log at debug.
+       * That is also exactly how two *total* failures stayed invisible: every
+       * option rejected because the server had already exited, and then
+       * `default-shell` rejected for being set in the wrong scope. Both are
+       * silent, and both change what the user sees, so this says something out
+       * loud instead.
+       */
+      const wrong: string[] = []
+      for (const [name, value] of sessionOptions) {
+        try {
+          const actual = (await this.run('show-options', '-gv', name)).trim()
+          if (actual !== value) wrong.push(`${name}=${actual} (wanted ${value})`)
+        } catch {
+          wrong.push(`${name}=<unreadable>`)
+        }
+      }
+      if (wrong.length > 0) {
+        log.warn(
+          `tmux rejected ${wrong.length} option(s): ${wrong.join(', ')}. Expect a ` +
+            `status bar stealing a line from every terminal, slow Esc in vim, or ` +
+            `sessions starting in the wrong shell. Check this tmux version's option ` +
+            `names and scopes.`,
+        )
+      }
     })().catch((err: unknown) => {
       this.serverReady = null // let the next caller retry
       throw err
@@ -161,6 +235,11 @@ export class TmuxBackend implements SessionBackend {
         '-y',
         String(rows),
       )
+      // No explicit shell argument here, deliberately. Naming one would make
+      // tmux run it as a plain command — argv[0] without the leading dash — and
+      // a shell that is not a login shell never reads the user's profile, so
+      // PATH additions and prompt customisation would silently go missing.
+      // `default-shell` is set instead, which tmux turns into `-bash`/`-zsh`.
     }
 
     await this.setTitle(id, title)

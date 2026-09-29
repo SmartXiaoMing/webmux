@@ -8,7 +8,7 @@
  */
 import { after, before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -315,6 +315,41 @@ describe('terminal sessions', () => {
     assert.ok(list.includes(`${PREFIX}${sessionId}`), `tmux should know about ${sessionId}`)
   })
 
+  it('actually applies its tmux configuration', async () => {
+    // Two ways this went wrong in production, both of them silent, which is why
+    // the assertions are on the options themselves rather than on anything the
+    // user sees:
+    //
+    //   - `start-server` returns 0 having left no server behind (`exit-empty`
+    //     defaults to on), so every `set-option` ran against nothing and the
+    //     first `new-session` built a server with the whole configuration
+    //     missing. Symptoms: tmux's status bar takes the bottom line of every
+    //     terminal — the cursor sits one line above where it belongs — Esc
+    //     waits 500 ms in vim, and scrollback is 2000 lines instead of 50000.
+    //   - `default-shell` is a session option, so setting it with `-s` fails
+    //     with "no current session" and every shell starts as the wrong one.
+    for (const [name, want] of [
+      ['status', 'off'],
+      ['window-size', 'manual'],
+      ['history-limit', '50000'],
+      ['mouse', 'off'],
+    ]) {
+      assert.equal((await tmux('show-options', '-gv', name)).trim(), want, `tmux ${name}`)
+    }
+
+    // Read with the session scope: the server scope cannot see this option at
+    // all, so a value here is what proves it was set in the right place.
+    const shell = (await tmux('show-options', '-gv', 'default-shell')).trim()
+    assert.ok(shell.startsWith('/'), `default-shell should be an absolute path, got "${shell}"`)
+
+    // And the shell is a *login* shell, so the user's profile is read. tmux marks
+    // that by prefixing argv[0] with a dash; naming the shell as an explicit
+    // command instead of setting `default-shell` would quietly lose it.
+    const panePid = (await tmux('list-panes', '-t', `webmux-${sessionId}`, '-F', '#{pane_pid}')).trim()
+    const argv0 = execFileSync('ps', ['-o', 'command=', '-p', panePid], { encoding: 'utf8' }).trim()
+    assert.match(argv0, /^-/, `shell should be a login shell, got argv0 "${argv0}"`)
+  })
+
   it('runs a command and streams its output', async () => {
     const client = new Client(sessionId)
     await client.connect()
@@ -394,19 +429,34 @@ describe('terminal sessions', () => {
     // Overflow the 64 KiB ring the test harness configures. Offsets before
     // this point are no longer recoverable, so a client holding one cannot be
     // served by replay.
+    //
+    // The output has to *vary*, which is not obvious and was learned the hard
+    // way: `head -c 200000 /dev/zero | tr '\0' 'x'` looks like 200 KB but
+    // reaches the PTY as about 13 KB, because tmux renders a screen rather than
+    // forwarding bytes and collapses a run of one repeated character. The
+    // fixture used to be that, and it only overflowed the ring while the tmux
+    // configuration was silently not being applied — so fixing the
+    // configuration broke this test instead of the bug it covers.
     const flood = new Client(sessionId)
     await flood.connect()
-    flood.write("head -c 200000 /dev/zero | tr '\\0' 'x'; echo FLOOD_DONE\r")
+    flood.write('seq 1 40000; echo FLOOD_DONE\r')
     await flood.waitForText('FLOOD_DONE', 30_000)
     flood.close()
 
     const stale = new Client(sessionId, { lastSeq: staleOffset })
     await stale.connect()
-    assert.ok(
-      stale.sawControl('resync'),
-      `an evicted offset must force a snapshot, got: ${stale.control.map((m) => m.t).join(',')}`,
+    const decision = stale.control.map((m) => m.t)
+    assert.equal(
+      decision[decision.indexOf('attached') + 1],
+      'resync',
+      `an evicted offset must force a snapshot, got: ${decision.join(',')}`,
     )
-    assert.ok(!stale.sawControl('replay'), 'bytes that no longer exist must not be replayed')
+    // Deliberately not "never replays": a `replay` *after* the snapshot is the
+    // designed catch-up for output produced while the screen was being
+    // serialised (see `resync` in terminal/session.ts), and whether one occurs
+    // depends on timing. What must never happen is the server choosing to
+    // replay the evicted gap, which is what the first frame after `attached`
+    // would be.
     stale.close()
   })
 

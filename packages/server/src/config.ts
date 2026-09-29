@@ -7,9 +7,10 @@ import { z } from 'zod'
  * Configuration resolves in three layers, later wins:
  *   defaults  <-  JSON config file  <-  WEBMUX_* environment variables
  *
- * Defaults are deliberately conservative: the server binds to loopback only,
- * so exposing it to a network is an explicit opt-in that forces the operator to
- * think about TLS and the reverse proxy in front of it.
+ * The default bind is 0.0.0.0, so container port mappings and a reverse proxy on
+ * another host work without configuration. That default is exposed, and the
+ * server speaks plain HTTP — so the boot warnings below exist to make sure the
+ * operator knows, rather than to make the choice for them.
  */
 
 /** Platform-appropriate per-user data directory. */
@@ -297,7 +298,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // sure that is a decision rather than an accident. Set WEBMUX_HOST=127.0.0.1
     // when a proxy on the same host connects over loopback.
     host: e.WEBMUX_HOST ?? file.host ?? '0.0.0.0',
-    port: e.WEBMUX_PORT ?? file.port ?? 8080,
+    port: e.WEBMUX_PORT ?? file.port ?? 8866,
     dataDir: path.resolve(e.WEBMUX_DATA_DIR ?? file.dataDir ?? dataDir),
     shell,
     tmuxSocket: e.WEBMUX_TMUX_SOCKET ?? file.tmuxSocket ?? 'webmux',
