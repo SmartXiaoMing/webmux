@@ -220,7 +220,6 @@ else
   esac
   [ -f /etc/alpine-release ] && die "Alpine 不适用官方 Node 预编译包（musl），请用 apk add nodejs 后重试"
 
-  NODE_BIN_DIR="${PREFIX}/runtime/node/bin"
   step "把 Node ${NODE_MAJOR_REQUIRED} 装进 ${PREFIX}/runtime（不动系统里的 node，也不加 apt 源）…"
 
   command -v curl >/dev/null 2>&1 || die "需要 curl 来下载 Node"
@@ -244,8 +243,28 @@ else
   tar -xJf "${TMP_TARBALL}" -C "${PREFIX}/runtime" --strip-components=1 ||
     die "解压 Node 失败"
   rm -rf "$(dirname "${TMP_TARBALL}")"
-  [ -x "${NODE_BIN_DIR}/node" ] || die "解压后没找到 node，安装目录可能是坏的"
-  ok "node $("${NODE_BIN_DIR}/node" -v) 已就位"
+
+  # Discover the binary instead of assuming where it landed. The tarball's
+  # internal layout belongs to the publisher, and `--strip-components=1` —
+  # which strips the version-bearing top directory, so the path stays stable
+  # across upgrades — puts it at runtime/bin/node today. Hard-coding the
+  # assumption here is how the first version of this script failed on a real
+  # machine with "the install directory may be broken" when nothing was broken.
+  # `-print -quit` rather than `| head -1`: a pipeline here can fail on SIGPIPE,
+  # and a failing substitution inside an assignment trips `set -e`.
+  NODE_BIN="$(find "${PREFIX}/runtime" -maxdepth 3 -type f -name node -perm -u+x -print -quit || true)"
+  if [ -z "${NODE_BIN}" ]; then
+    warn "解压出来的结构："
+    find "${PREFIX}/runtime" -maxdepth 2 | sed 's/^/    /' >&2
+    die "在 ${PREFIX}/runtime 里找不到 node 可执行文件"
+  fi
+  NODE_BIN_DIR="$(dirname "${NODE_BIN}")"
+
+  # Running it is the only check that proves the download is usable, as opposed
+  # to merely present.
+  NODE_VERSION="$("${NODE_BIN}" -v 2>/dev/null || true)"
+  [ -n "${NODE_VERSION}" ] || die "解压出来的 node 跑不起来：${NODE_BIN}"
+  ok "node ${NODE_VERSION} 已就位（${NODE_BIN_DIR}）"
 fi
 
 # pnpm, into whichever Node we settled on. npm ships with Node, so this needs no
