@@ -215,6 +215,21 @@ export const fsTouchRequest = z.object({
   path: z.string().min(1).max(4096),
 })
 
+/**
+ * Replaces the contents of an existing text file.
+ *
+ * Create-only `touch` is the path for new files; this one never creates, so a
+ * file deleted since it was previewed answers 404 rather than being silently
+ * resurrected. `baseMtimeMs` is the mtime the client last saw — the server
+ * refuses the write when the file has changed underneath it, which is the only
+ * thing standing between a stale editor and a clobbered file.
+ */
+export const fsWriteRequest = z.object({
+  path: z.string().min(1).max(4096),
+  text: z.string(),
+  baseMtimeMs: z.number().nonnegative().optional(),
+})
+
 export const fsRenameRequest = z.object({
   from: z.string().min(1).max(4096),
   to: z.string().min(1).max(4096),

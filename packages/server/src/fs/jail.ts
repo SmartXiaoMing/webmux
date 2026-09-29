@@ -68,6 +68,7 @@ export type FsErrorCode =
   | 'readonly_fs'
   | 'resource_busy'
   | 'cross_device'
+  | 'conflict'
   | 'no_space'
   | 'too_large'
   | 'insufficient_storage'
@@ -178,6 +179,9 @@ export interface ResolvedPath {
  * - `target` — the path is the thing being operated on (delete, rename source).
  *              Not dereferenced, so `rm ~/link` removes the link, not its
  *              target. A root itself is refused.
+ * - `write`  — `read`, plus the root must be writable and the thing must be a
+ *              regular file. Dereferences first, so editing a file through a
+ *              symlink edits its target — which is what the preview showed.
  * - `create` — the path may not exist yet. The parent must exist and be inside
  *              a writable root.
  * - `createRecursive` — as `create`, but intermediate directories may be
@@ -185,7 +189,7 @@ export interface ResolvedPath {
  *              ancestor that *does* exist is still canonicalised and checked,
  *              so containment is as tight as it is everywhere else.
  */
-type Mode = 'read' | 'dir' | 'entry' | 'target' | 'create' | 'createRecursive'
+type Mode = 'read' | 'write' | 'dir' | 'entry' | 'target' | 'create' | 'createRecursive'
 
 export class Jail {
   private readonly active: JailRoot[]
@@ -205,6 +209,17 @@ export class Jail {
 
   resolve(input: string): Promise<ResolvedPath> {
     return this.resolvePath(input, 'read')
+  }
+
+  /**
+   * Resolves a path for replacing an existing file's contents.
+   *
+   * Separate from `resolve` because reading and writing are not the same
+   * permission: the writable check belongs here, next to the containment
+   * check, rather than at each call site where it can be forgotten.
+   */
+  resolveForWrite(input: string): Promise<ResolvedPath> {
+    return this.resolvePath(input, 'write')
   }
 
   resolveDir(input: string): Promise<ResolvedPath> {
@@ -233,7 +248,7 @@ export class Jail {
   private async resolvePath(input: string, mode: Mode): Promise<ResolvedPath> {
     const literal = this.validate(input)
 
-    if (mode === 'read' || mode === 'dir' || mode === 'createRecursive') {
+    if (mode === 'read' || mode === 'write' || mode === 'dir' || mode === 'createRecursive') {
       const { real, exists } = await this.canonicalise(literal)
 
       // Ownership is settled before existence, so anything outside every root
@@ -249,6 +264,11 @@ export class Jail {
       const root = this.locate(real)
       this.assertInsideRoot(root, real)
       this.assertNotReserved(real)
+
+      // Before the existence check, as `create` does: a read-only root refuses
+      // a write whether or not the file is there, so the answer cannot be used
+      // to probe what a read-only root contains.
+      if (mode === 'write') this.assertWritable(root)
 
       if (mode === 'createRecursive') {
         this.assertWritable(root)
@@ -266,6 +286,17 @@ export class Jail {
           throw toFsError(err)
         })
         if (!info.isDirectory()) throw new FsError('not_a_directory', 'not a directory', 400)
+      }
+
+      if (mode === 'write') {
+        const info = await stat(real).catch((err: unknown) => {
+          throw toFsError(err)
+        })
+        // Directories are called out separately because "you cannot save a
+        // file over a directory" and "that is a device node" are different
+        // mistakes, and the shell's own wording for each is recognisable.
+        if (info.isDirectory()) throw new FsError('is_a_directory', 'that is a directory', 400)
+        if (!info.isFile()) throw new FsError('not_a_file', 'that is not a regular file', 400)
       }
       return { abs: real, root, literal, exists: true }
     }

@@ -384,3 +384,54 @@ describe('platform behaviour', () => {
     await expectError(() => jail.resolveTarget(`${ROOT}/nope.txt`), 'not_found')
   })
 })
+
+describe('resolveForWrite', () => {
+  it('accepts a regular file and canonicalises it', async () => {
+    const resolved = await jail.resolveForWrite(`${ROOT}/file.txt`)
+    assert.equal(resolved.abs, path.join(ROOT, 'file.txt'))
+    assert.equal(resolved.root.name, 'home')
+    assert.equal(resolved.exists, true)
+  })
+
+  it('follows an in-jail symlink to the file it points at', async () => {
+    // The preview followed it, so the save has to as well — otherwise what was
+    // edited on screen and what was written would be different files.
+    symlinkSync(path.join(ROOT, 'file.txt'), path.join(ROOT, 'link-to-file'))
+    const resolved = await jail.resolveForWrite(`${ROOT}/link-to-file`)
+    assert.equal(resolved.abs, path.join(ROOT, 'file.txt'))
+  })
+
+  it('refuses anything that is not a regular file', async () => {
+    await expectError(() => jail.resolveForWrite(`${ROOT}/sub`), 'is_a_directory')
+    await expectError(() => jail.resolveForWrite(ROOT), 'is_a_directory')
+    await expectError(() => jail.resolveForWrite(`${ROOT}/link-inside`), 'is_a_directory')
+  })
+
+  it('refuses a path that is not there, including a dangling link', async () => {
+    await expectError(() => jail.resolveForWrite(`${ROOT}/nope.txt`), 'not_found')
+    // `invalid_path`, not `not_found`: a dangling link is refused as a link
+    // rather than reported as an absent file, which is what stops a caller
+    // from believing it can create something there.
+    await expectError(() => jail.resolveForWrite(`${ROOT}/dangling`), 'invalid_path')
+  })
+
+  it('refuses a read-only root before it looks at the path', async () => {
+    await expectError(() => jail.resolveForWrite(`${ROOT}/ro/sealed.txt`), 'readonly_root')
+    // Also for a path that is not there: the answer must not reveal whether a
+    // read-only root contains something.
+    await expectError(() => jail.resolveForWrite(`${ROOT}/ro/nope.txt`), 'readonly_root')
+  })
+
+  it('refuses the reserved data directory and anything leaving the root', async () => {
+    await expectError(() => jail.resolveForWrite(`${DATA}/webmux.db`), 'forbidden_path')
+    await expectError(() => jail.resolveForWrite(`${ROOT}/link-outside-file`), 'path_escape')
+    await expectError(() => jail.resolveForWrite(`${ROOT}/link-chain/secret.txt`), 'path_escape')
+    await expectError(() => jail.resolveForWrite(`${OUTSIDE}/secret.txt`), 'path_escape')
+  })
+
+  it('rejects a malformed path before touching the filesystem', async () => {
+    await expectError(() => jail.resolveForWrite('sub/file.txt'), 'invalid_path')
+    await expectError(() => jail.resolveForWrite(''), 'invalid_path')
+    await expectError(() => jail.resolveForWrite(`${ROOT}/file.txt\0`), 'invalid_path')
+  })
+})

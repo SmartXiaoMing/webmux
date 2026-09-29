@@ -18,6 +18,7 @@ import {
   fsUploadChunkQuery,
   fsUploadCompleteRequest,
   fsUploadInitRequest,
+  fsWriteRequest,
   type FsListing,
   type FsRoot,
   type FsStat,
@@ -33,9 +34,11 @@ import {
   listDirectory,
   makeDirectory,
   renamePath,
+  saveTextFile,
   statPath,
 } from '../fs/ops'
 import {
+  PREVIEW_TEXT_LIMIT_BYTES,
   contentDisposition,
   inlineDisposition,
   mimeFor,
@@ -278,6 +281,37 @@ export function registerFileRoutes(app: FastifyInstance, ctx: FileRoutesContext)
       return sendFsError(reply, err, 'touch')
     }
   })
+
+  /**
+   * Saves an edited text file.
+   *
+   * Only replaces an existing file: creating one is `touch`'s job, and a path
+   * that was deleted while it sat open in the editor should say so rather than
+   * come back to life.
+   *
+   * The body limit is set explicitly because the default 1 MiB is *smaller*
+   * than a legal payload: JSON escaping a control character costs six bytes,
+   * so a 512 KiB file of them would be refused before the handler ran.
+   */
+  app.put(
+    '/api/fs/content',
+    { preHandler: auth, bodyLimit: 6 * PREVIEW_TEXT_LIMIT_BYTES + 64 * 1024 },
+    async (req, reply) => {
+      const parsed = fsWriteRequest.safeParse(req.body ?? {})
+      if (!parsed.success) return sendInvalid(reply, firstIssue(parsed.error))
+
+      try {
+        const target = await ctx.jail.resolveForWrite(parsed.data.path)
+        await saveTextFile(target, parsed.data.text, {
+          ...(parsed.data.baseMtimeMs !== undefined ? { baseMtimeMs: parsed.data.baseMtimeMs } : {}),
+        })
+        audit(ctx.auth.db, 'fs.write', parsed.data.path, req.ip)
+        return await describe(target.abs)
+      } catch (err) {
+        return sendFsError(reply, err, 'write')
+      }
+    },
+  )
 
   app.post('/api/fs/rename', { preHandler: auth }, async (req, reply) => {
     const parsed = fsRenameRequest.safeParse(req.body ?? {})

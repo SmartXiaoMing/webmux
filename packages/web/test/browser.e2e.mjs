@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -591,6 +592,77 @@ describe('webmux in a browser', () => {
 
     await dialog.getByRole('button', { name: '关闭' }).click()
     await dialog.waitFor({ state: 'detached', timeout: 15_000 })
+  })
+
+  it('edits a text file and saves it back to disk', async () => {
+    const target = path.join(filesRoot, 'editable.txt')
+    writeFileSync(target, 'before edit\n')
+    chmodSync(target, 0o640)
+
+    // The file appeared behind the app's back, so the listing has to be
+    // reloaded from the server to see it — which is also what proves the row
+    // below is server state rather than anything the page invented.
+    await page.reload()
+    await page.locator('header button:has-text("文件")').click()
+
+    const rows = page.locator('ul[aria-label="文件列表"] li')
+    await rows.filter({ hasText: 'editable.txt' }).waitFor({ timeout: 15_000 })
+    await rows.filter({ hasText: 'editable.txt' }).locator('button').first().click()
+
+    const dialog = page.locator('[role=dialog][aria-label="预览 editable.txt"]')
+    await dialog.waitFor({ timeout: 15_000 })
+    await dialog.locator('pre').filter({ hasText: 'before edit' }).waitFor({ timeout: 15_000 })
+
+    await dialog.getByRole('button', { name: '编辑' }).click()
+    const editor = dialog.locator('textarea')
+    await editor.waitFor({ timeout: 15_000 })
+    await editor.fill('after edit\nsecond line\n')
+    await dialog.getByRole('button', { name: '保存' }).click()
+
+    // The overlay stays open on what was saved, and the disk agrees.
+    await dialog.locator('pre').filter({ hasText: 'after edit' }).waitFor({ timeout: 15_000 })
+    assert.equal(readFileSync(target, 'utf8'), 'after edit\nsecond line\n')
+    // The file's own mode, not a fresh file's: a write that went through a
+    // staging file would have left this 0600.
+    assert.equal(statSync(target).mode & 0o777, 0o640)
+
+    await dialog.getByRole('button', { name: '关闭' }).click()
+    await dialog.waitFor({ state: 'detached', timeout: 15_000 })
+
+    // Re-open it: the text came back from the server, not from component state.
+    await rows.filter({ hasText: 'editable.txt' }).locator('button').first().click()
+    const reopened = page.locator('[role=dialog][aria-label="预览 editable.txt"]')
+    await reopened.locator('pre').filter({ hasText: 'after edit' }).waitFor({ timeout: 15_000 })
+    await reopened.getByRole('button', { name: '关闭' }).click()
+    await reopened.waitFor({ state: 'detached', timeout: 15_000 })
+  })
+
+  it('asks before discarding an unsaved edit', async () => {
+    const target = path.join(filesRoot, 'editable.txt')
+    const rows = page.locator('ul[aria-label="文件列表"] li')
+    await rows.filter({ hasText: 'editable.txt' }).locator('button').first().click()
+
+    const dialog = page.locator('[role=dialog][aria-label="预览 editable.txt"]')
+    await dialog.getByRole('button', { name: '编辑' }).click()
+    const editor = dialog.locator('textarea')
+    await editor.fill('thrown away')
+
+    // Closing with unsaved work must not be the fast path.
+    await dialog.getByRole('button', { name: '关闭' }).click()
+    await dialog.getByText('有未保存的修改').waitFor({ timeout: 5_000 })
+
+    await dialog.getByRole('button', { name: '继续编辑' }).click()
+    assert.equal(await editor.inputValue(), 'thrown away', 'declining keeps the draft')
+
+    // Escape is the other way out, and it goes through the same confirmation.
+    await page.keyboard.press('Escape')
+    await dialog.getByRole('button', { name: '放弃修改' }).click()
+    await dialog.waitFor({ state: 'detached', timeout: 15_000 })
+    assert.equal(
+      readFileSync(target, 'utf8'),
+      'after edit\nsecond line\n',
+      'discarding an edit must not touch the file',
+    )
   })
 
   it('creates an empty file', async () => {

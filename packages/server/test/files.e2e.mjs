@@ -19,6 +19,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -246,6 +247,7 @@ describe('authentication is required on every fs route', () => {
     ['GET', `/api/fs/preview?path=${url('/')}`],
     ['GET', `/api/fs/archive?path=${url('/')}`],
     ['POST', '/api/fs/touch'],
+    ['PUT', '/api/fs/content'],
     ['POST', '/api/fs/extract'],
     ['POST', '/api/fs/upload/init'],
     ['GET', '/api/fs/upload/aaaaaaaaaaaaaaaaaaaaaa'],
@@ -1041,6 +1043,188 @@ describe('touch', () => {
       body: JSON.stringify({ path: path.join(OUTSIDE, 'nope') }),
     })
     assert.equal(outside.status, 403)
+  })
+})
+
+describe('write content', () => {
+  const save = (target, text, baseMtimeMs) =>
+    api('/api/fs/content', {
+      method: 'PUT',
+      body: JSON.stringify({ path: target, text, ...(baseMtimeMs !== undefined ? { baseMtimeMs } : {}) }),
+    })
+
+  it('replaces the contents and describes the result', async () => {
+    const target = path.join(HOME_ROOT, 'edit.txt')
+    writeFileSync(target, 'before')
+
+    const { status, body } = await save(target, 'after\nline two')
+    assert.equal(status, 200)
+    assert.equal(body.kind, 'file')
+    assert.equal(body.name, 'edit.txt')
+    assert.equal(readFileSync(target, 'utf8'), 'after\nline two')
+    // The response is what the editor uses as the base for its next save, so
+    // it has to describe what is actually on disk.
+    assert.equal(body.mtimeMs, statSync(target).mtimeMs)
+
+    rmSync(target)
+  })
+
+  it('accepts a second save built on the first one', async () => {
+    const target = path.join(HOME_ROOT, 'twice.txt')
+    writeFileSync(target, 'one')
+
+    const first = await save(target, 'two')
+    assert.equal(first.status, 200)
+    const second = await save(target, 'three', first.body.mtimeMs)
+    assert.equal(second.status, 200, 'the mtime from the previous response must be current')
+    assert.equal(readFileSync(target, 'utf8'), 'three')
+
+    rmSync(target)
+  })
+
+  it('keeps the file mode, which a staging file would not', async () => {
+    const target = path.join(HOME_ROOT, 'mode.txt')
+    writeFileSync(target, 'x')
+    chmodSync(target, 0o640)
+
+    await save(target, 'y')
+    assert.equal(statSync(target).mode & 0o777, 0o640)
+
+    rmSync(target)
+  })
+
+  it('leaves no temporary file behind', async () => {
+    const dir = path.join(HOME_ROOT, 'tidy')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, 'a.txt'), 'x')
+
+    await save(path.join(dir, 'a.txt'), 'y')
+    const leftovers = readdirSync(dir).filter((name) => name.startsWith('.webmux-save-'))
+    assert.deepEqual(leftovers, [])
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('refuses a file that does not exist rather than creating it', async () => {
+    const target = path.join(HOME_ROOT, 'never-existed.txt')
+    const { status, body } = await save(target, 'content')
+    assert.equal(status, 404)
+    assert.equal(body.error.code, 'not_found')
+    assert.equal(existsSync(target), false)
+  })
+
+  it('refuses a directory', async () => {
+    const { status, body } = await save(path.join(HOME_ROOT, 'sub'), 'content')
+    assert.equal(status, 400)
+    assert.equal(body.error.code, 'is_a_directory')
+  })
+
+  it('refuses a read-only root, an escape, and the reserved data directory', async () => {
+    const readonly = await save(path.join(RO_ROOT, 'sealed.txt'), 'gone')
+    assert.equal(readonly.status, 403)
+    assert.equal(readonly.body.error.code, 'readonly_root')
+    assert.equal(readFileSync(path.join(RO_ROOT, 'sealed.txt'), 'utf8'), 'sealed')
+
+    const escape = await save(path.join(OUTSIDE, 'secret.txt'), 'gone')
+    assert.equal(escape.status, 403)
+    assert.equal(escape.body.error.code, 'path_escape')
+    assert.equal(readFileSync(path.join(OUTSIDE, 'secret.txt'), 'utf8'), 'secret')
+
+    const reserved = await save(path.join(dataDir, 'webmux.db'), 'gone')
+    assert.equal(reserved.status, 403)
+    assert.equal(reserved.body.error.code, 'forbidden_path')
+  })
+
+  it('refuses to overwrite a file that changed since it was loaded', async () => {
+    const target = path.join(HOME_ROOT, 'racing.txt')
+    writeFileSync(target, 'loaded')
+    const loadedAt = statSync(target).mtimeMs
+
+    // Someone else — another tab, or a shell — writes in between.
+    await delay(20)
+    writeFileSync(target, 'changed elsewhere')
+
+    const { status, body } = await save(target, 'from the stale editor', loadedAt)
+    assert.equal(status, 409)
+    assert.equal(body.error.code, 'conflict')
+    assert.equal(readFileSync(target, 'utf8'), 'changed elsewhere')
+
+    // With the current mtime the same save goes through: the refusal is about
+    // staleness, not about the write being forbidden.
+    const fresh = await save(target, 'from the stale editor', statSync(target).mtimeMs)
+    assert.equal(fresh.status, 200)
+
+    rmSync(target)
+  })
+
+  it('refuses a file larger than the edit limit', async () => {
+    const target = path.join(HOME_ROOT, 'huge.log')
+    writeFileSync(target, 'x'.repeat(600_000))
+
+    // A truncated preview is exactly the limit in size, so a save built on one
+    // would replace the file with its own first 512 KiB.
+    const { status, body } = await save(target, 'small')
+    assert.equal(status, 413)
+    assert.equal(body.error.code, 'too_large')
+    assert.equal(readFileSync(target).length, 600_000)
+
+    rmSync(target)
+  })
+
+  it('refuses text larger than the edit limit', async () => {
+    const target = path.join(HOME_ROOT, 'grow.txt')
+    writeFileSync(target, 'small')
+
+    const { status, body } = await save(target, 'x'.repeat(512 * 1024 + 1))
+    assert.equal(status, 413)
+    assert.equal(body.error.code, 'too_large')
+    assert.equal(readFileSync(target, 'utf8'), 'small')
+
+    rmSync(target)
+  })
+
+  it('rejects an oversized body without writing anything', async () => {
+    const target = path.join(HOME_ROOT, 'body.txt')
+    writeFileSync(target, 'small')
+
+    // Fastify refuses a declared-oversize body before reading it and drops the
+    // connection. Whether the client sees the 413 response or a broken pipe
+    // first is a race, so both are accepted here — what is not acceptable is a
+    // 500, or the file being touched.
+    let status = null
+    try {
+      ;({ status } = await save(target, 'x'.repeat(4 * 1024 * 1024)))
+    } catch {
+      status = null
+    }
+    if (status !== null) assert.equal(status, 413, 'a body over the limit is a refusal, not a fault')
+    assert.equal(readFileSync(target, 'utf8'), 'small')
+
+    rmSync(target)
+  })
+
+  it('writes through an in-jail symlink, keeping the link', async () => {
+    const real = path.join(HOME_ROOT, 'real.txt')
+    const alias = path.join(HOME_ROOT, 'alias.txt')
+    writeFileSync(real, 'original')
+    symlinkSync(real, alias)
+
+    // The preview followed the link, so the save has to follow it too —
+    // otherwise what is edited on screen and what is written would differ.
+    const { status } = await save(alias, 'through the link')
+    assert.equal(status, 200)
+    assert.equal(readFileSync(real, 'utf8'), 'through the link')
+    assert.equal(lstatSync(alias).isSymbolicLink(), true)
+
+    rmSync(alias)
+    rmSync(real)
+  })
+
+  it('refuses a symlink that leaves the jail', async () => {
+    const { status, body } = await save(path.join(HOME_ROOT, 'link-secret'), 'gone')
+    assert.equal(status, 403)
+    assert.equal(body.error.code, 'path_escape')
+    assert.equal(readFileSync(path.join(OUTSIDE, 'secret.txt'), 'utf8'), 'secret')
   })
 })
 

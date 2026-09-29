@@ -131,6 +131,19 @@ export const api = {
   createFile: (path: string) =>
     request<FsStat>('/api/fs/touch', { method: 'POST', body: JSON.stringify({ path }) }),
 
+  /**
+   * Saves an edited text file.
+   *
+   * `baseMtimeMs` is the mtime the editor loaded. The server answers 409 when
+   * the file has changed since, which is all that stands between a tab left
+   * open overnight and someone else's edit being silently overwritten.
+   */
+  saveFileText: (path: string, text: string, baseMtimeMs?: number) =>
+    request<FsStat>('/api/fs/content', {
+      method: 'PUT',
+      body: JSON.stringify({ path, text, ...(baseMtimeMs !== undefined ? { baseMtimeMs } : {}) }),
+    }),
+
   extract: (input: { path: string } | { uploadId: string }, dest: string) =>
     request<FsStat & { files: number; directories: number; bytes: number }>('/api/fs/extract', {
       method: 'POST',

@@ -1,9 +1,11 @@
-import { lstat, mkdir, open, opendir, rename, rm, unlink } from 'node:fs/promises'
+import { chmod, chown, lstat, mkdir, open, opendir, rename, rm, unlink } from 'node:fs/promises'
+import { constants as FS } from 'node:fs'
 import type { Dirent } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import type { FsEntry, FsEntryKind, FsListing, FsSort, FsStat } from '@webmux/shared'
 import { FsError, toFsError, type Jail, type ResolvedPath } from './jail'
-import { previewPolicy } from './stream'
+import { PREVIEW_TEXT_LIMIT_BYTES, previewPolicy } from './stream'
 
 /**
  * Directory operations, on paths the jail has already vouched for.
@@ -263,6 +265,91 @@ export async function createEmptyFile(target: ResolvedPath): Promise<void> {
     const handle = await open(target.abs, 'wx', 0o644)
     await handle.close()
   } catch (err) {
+    throw toFsError(err)
+  }
+}
+
+/**
+ * Replaces the contents of a text file.
+ *
+ * Written to a temporary file beside the target and renamed into place, so a
+ * concurrent reader — or a crash — never sees a half-written file. The rename
+ * also makes the two failure modes that matter impossible: a full disk leaves
+ * the original untouched rather than truncated, and there is no window in
+ * which the file exists but is empty. The temp is in the same directory, which
+ * is what keeps the rename atomic and removes the cross-device case entirely.
+ *
+ * Mode and ownership are carried over explicitly. The temp file is created
+ * fresh, so without this a 0664 file would come back 0600 (and, for a file
+ * owned by someone else, owned by the server's user instead) — which is
+ * exactly the trap that made the upload path unusable for this.
+ *
+ * The mtime token is what stops a stale editor from clobbering a file that
+ * changed underneath it; callers that pass no token get an unconditional write.
+ */
+export async function saveTextFile(
+  target: ResolvedPath,
+  text: string,
+  opts: { baseMtimeMs?: number } = {},
+): Promise<void> {
+  const bytes = Buffer.from(text, 'utf8')
+  if (bytes.length > PREVIEW_TEXT_LIMIT_BYTES) {
+    throw new FsError('too_large', 'text is larger than the edit limit', 413)
+  }
+
+  let info
+  let handle
+  try {
+    // Canonical path, so O_NOFOLLOW cannot reject a legitimate request; it
+    // fires only if the final component was swapped for a link after the jail
+    // checked it.
+    handle = await open(target.abs, FS.O_RDONLY | FS.O_NOFOLLOW)
+    // From the descriptor, never a second path-based stat: the size and mtime
+    // below are what the guards act on, and a path name can be pointed
+    // somewhere else between two calls.
+    info = await handle.stat()
+  } catch (err) {
+    await handle?.close().catch(() => {})
+    throw toFsError(err)
+  }
+  await handle.close()
+
+  if (!info.isFile()) {
+    throw new FsError('not_a_file', 'that is not a regular file', 400)
+  }
+  // A truncated preview is exactly the limit in size, so checking only the
+  // text being written would let the prefix overwrite a larger file with
+  // itself. This is the check that makes "what you saw is what you save" true.
+  if (info.size > PREVIEW_TEXT_LIMIT_BYTES) {
+    throw new FsError('too_large', 'the file is larger than the edit limit', 413)
+  }
+  if (opts.baseMtimeMs !== undefined && info.mtimeMs !== opts.baseMtimeMs) {
+    throw new FsError('conflict', 'the file changed on disk since it was loaded', 409)
+  }
+
+  const mode = info.mode & 0o7777
+  const temp = path.join(path.dirname(target.abs), `.webmux-save-${randomBytes(6).toString('hex')}`)
+  try {
+    const out = await open(temp, 'wx', mode)
+    try {
+      await out.writeFile(bytes)
+      // Durable before it is visible: the rename below is only atomic with
+      // respect to other processes, not to a power cut.
+      await out.sync()
+    } finally {
+      await out.close()
+    }
+    // Best-effort: without CAP_CHOWN this fails whenever the file belongs to
+    // someone else, and the write is still worth carrying out — the new file
+    // is then owned by the service user, which is a smaller surprise than
+    // refusing to save.
+    await chown(temp, info.uid, info.gid).catch(() => {})
+    // Not redundant with the mode passed to open: the umask has already been
+    // applied to that one.
+    await chmod(temp, mode)
+    await rename(temp, target.abs)
+  } catch (err) {
+    await rm(temp, { force: true }).catch(() => {})
     throw toFsError(err)
   }
 }

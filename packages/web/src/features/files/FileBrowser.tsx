@@ -544,8 +544,15 @@ export function FileBrowser({
       {previewing !== null && (
         <PreviewOverlay
           entry={previewing}
+          readonly={readonly}
           onClose={() => setPreviewing(null)}
           onSignOut={onSignOut}
+          onSaved={(stat) => {
+            // Keep the overlay open on what was just saved, and refresh the
+            // row underneath so its size and mtime stop being stale.
+            setPreviewing(stat)
+            if (path !== null) void load(path)
+          }}
         />
       )}
 
