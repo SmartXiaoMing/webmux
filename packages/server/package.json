@@ -18,7 +18,7 @@
     "@webmux/shared": "workspace:*",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
-    "better-sqlite3": "^13.0.3",
+    "better-sqlite3": "11.8.1",
     "fastify": "^5.12.5",
     "jose": "^6.2.12",
     "node-pty": "^1.1.0",
