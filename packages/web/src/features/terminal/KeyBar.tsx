@@ -27,6 +27,10 @@ export interface KeyBarProps {
 
 /** Sequences as a real terminal sends them. */
 const KEYS: Array<{ label: string; seq: string; title: string }> = [
+  // First, because it is the key a soft keyboard hides when the on-screen
+  // return is swallowed by the app shell — and CR, not LF, for the reason
+  // spelled out on `macroSequence`.
+  { label: 'Enter', seq: '\r', title: '回车（Enter）' },
   { label: 'Esc', seq: '\x1b', title: 'Escape' },
   { label: 'Tab', seq: '\t', title: 'Tab' },
   { label: '↑', seq: '\x1b[A', title: 'Up' },

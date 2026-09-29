@@ -351,7 +351,7 @@ GET    /s/:token/raw            实际流式下载（限速 + 计数 + 过期校
 
 | 问题 | 解法 |
 |---|---|
-| 虚拟键盘没有 Ctrl/Esc/Tab/方向键 | 自制**快捷键条**（Esc / Ctrl / Alt / Tab / ↑↓←→ / `\|` / `~` / `-` / `/`），Ctrl 做粘滞态 |
+| 虚拟键盘没有 Ctrl/Esc/Tab/方向键 | 自制**快捷键条**（回车 / Esc / Ctrl / Alt / Tab / ↑↓←→ / `\|` / `~` / `-` / `/`），Ctrl 做粘滞态 |
 | iOS 键盘弹出把终端顶飞 | 监听 `visualViewport.resize` 调整容器高度，**不要用 `window.innerHeight`** |
 | xterm.js 触摸滚动很糟 | 覆盖一层透明 `overflow-y:auto` 的 div，同步 `scrollTop` ↔ `term.scrollToLine()` |
 | 长任务时手机息屏 | `navigator.wakeLock.request('screen')`，配合页面可见性自动重申请 |
