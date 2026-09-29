@@ -81,6 +81,16 @@ export function FolderPlusIcon({ size }: IconProps): React.JSX.Element {
   )
 }
 
+/** A folder with an arrow rising out of it: uploading a whole directory. */
+export function FolderUpIcon({ size }: IconProps): React.JSX.Element {
+  return (
+    <Svg size={size}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+      <path d="M12 16V10.5M9.5 12.5 12 10l2.5 2.5" />
+    </Svg>
+  )
+}
+
 export function FilePlusIcon({ size }: IconProps): React.JSX.Element {
   return (
     <Svg size={size}>

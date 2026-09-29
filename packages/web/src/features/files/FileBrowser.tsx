@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FsEntry, FsListing, FsRoot, FsSort } from '@webmux/shared'
 import { ApiError, api } from '../../lib/api'
-import { safeName, uploads } from '../../lib/upload'
+import { safeName } from '../../lib/upload'
+import {
+  batchLabel,
+  manifestFromFileList,
+  manifestFromSnapshot,
+  runManifest,
+  snapshotDrop,
+  type UploadManifest,
+} from '../../lib/folder-upload'
 import { breadcrumbs, formatBytes, formatTime, iconFor, joinPath } from './format'
 import { MoveDialog } from './MoveDialog'
 import { PreviewOverlay } from './PreviewOverlay'
@@ -13,6 +21,7 @@ import {
   EyeOffIcon,
   FilePlusIcon,
   FolderPlusIcon,
+  FolderUpIcon,
   StarIcon,
   TerminalIcon,
   UploadIcon,
@@ -90,6 +99,7 @@ export function FileBrowser({
   const [unpacking, setUnpacking] = useState<string | null>(null)
 
   const fileInput = useRef<HTMLInputElement>(null)
+  const folderInput = useRef<HTMLInputElement>(null)
   /**
    * Guards against a stale response overwriting a newer one — rapid navigation
    * can land out of order.
@@ -198,20 +208,23 @@ export function FileBrowser({
   }, [path, favoritePaths, onPlacesChanged, handleError])
   const root = useMemo(() => roots.find((r) => r.name === listing?.root) ?? null, [roots, listing])
 
-  const startUpload = useCallback(
-    async (files: FileList | File[]): Promise<void> => {
+  /**
+   * Runs a picked or dropped selection as one batch.
+   *
+   * The batch runner owns the ordering (directories before the files inside
+   * them), the concurrency bound and the failure attribution; this only has to
+   * reload the listing once at the end — doing it per file is a thousand
+   * directory listings for a thousand-file folder.
+   */
+  const startBatch = useCallback(
+    async (manifest: UploadManifest): Promise<void> => {
       if (path === null) return
-      // Not awaited as a group: each file is independent, and one failure must
-      // not cancel the others.
-      for (const file of Array.from(files)) {
-        const target = joinPath(path, safeName(file.name))
-        void uploads
-          .upload(file, target)
-          .then(() => load(path))
-          .catch(() => {
-            // The tray already shows the failure; nothing to add here.
-          })
+
+      const result = await runManifest(manifest, path, batchLabel(manifest))
+      if (manifest.errors.length > 0) {
+        setError(`${manifest.errors.length} 项无法读取，已跳过`)
       }
+      if (result.uploaded > 0 || manifest.dirs.length > 0) await load(path)
     },
     [path, load],
   )
@@ -296,7 +309,17 @@ export function FileBrowser({
         if (readonly) return
         event.preventDefault()
         setDragging(false)
-        if (event.dataTransfer.files.length > 0) void startUpload(event.dataTransfer.files)
+        // Snapshot taken synchronously, before anything is awaited: a
+        // DataTransferItem stops answering `webkitGetAsEntry()` the moment
+        // this handler returns, and a dropped folder's contents are only
+        // reachable through those entries. There is deliberately no
+        // `files.length > 0` gate — a folder-only drop can leave `.files`
+        // empty, and in Chrome the folder itself shows up there as a 0-byte
+        // entry that used to be uploaded over a real file of the same name.
+        const snapshot = snapshotDrop(event.dataTransfer)
+        void manifestFromSnapshot(snapshot)
+          .then(startBatch)
+          .catch(() => setError('无法读取拖入的内容'))
       }}
     >
       {/* Toolbar */}
@@ -452,13 +475,42 @@ export function FileBrowser({
             >
               <UploadIcon />
             </button>
+            <button
+              type="button"
+              data-toolbar="upload-folder"
+              aria-label="上传文件夹"
+              title="上传文件夹"
+              className="btn btn-ghost !min-h-7 !px-1.5 !py-0 text-xs"
+              onClick={() => folderInput.current?.click()}
+            >
+              <FolderUpIcon />
+            </button>
             <input
               ref={fileInput}
+              data-upload="files"
               type="file"
               multiple
               className="hidden"
               onChange={(event) => {
-                if (event.target.files) void startUpload(event.target.files)
+                if (event.target.files) void startBatch(manifestFromFileList([...event.target.files]))
+                // Cleared so picking the same file again still fires.
+                event.target.value = ''
+              }}
+            />
+            {/* Shown on every device on purpose: Safari on iOS ignores
+                `webkitdirectory` and opens a plain file picker, which this
+                same code path handles as loose files. Feature-detecting it
+                reliably is not possible, and hiding the button on a false
+                negative is worse than a harmless degradation. */}
+            <input
+              ref={folderInput}
+              data-upload="folder"
+              type="file"
+              multiple
+              className="hidden"
+              {...({ webkitdirectory: '' } as Record<string, string>)}
+              onChange={(event) => {
+                if (event.target.files) void startBatch(manifestFromFileList([...event.target.files]))
                 event.target.value = ''
               }}
             />

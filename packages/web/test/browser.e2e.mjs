@@ -543,7 +543,7 @@ describe('webmux in a browser', () => {
     // Upload, which exercises init → chunks → complete.
     const uploadSource = path.join(tmpRoot, 'upload-me.txt')
     writeFileSync(uploadSource, 'uploaded content')
-    await page.setInputFiles('input[type=file]', uploadSource)
+    await page.setInputFiles('[data-upload="files"]', uploadSource)
     await rows.filter({ hasText: 'upload-me.txt' }).waitFor({ timeout: 30_000 })
     assert.equal(
       readFileSync(path.join(filesRoot, 'upload-me.txt'), 'utf8'),
@@ -717,7 +717,7 @@ describe('webmux in a browser', () => {
 
   it('uploads that archive back and unpacks it', async () => {
     const rows = page.locator('ul[aria-label="文件列表"] li')
-    await page.setInputFiles('input[type=file]', path.join(tmpRoot, 'packed.zip'))
+    await page.setInputFiles('[data-upload="files"]', path.join(tmpRoot, 'packed.zip'))
     await rows.filter({ hasText: 'packed.zip' }).waitFor({ timeout: 30_000 })
 
     const row = rows.filter({ hasText: 'packed.zip' })
@@ -747,6 +747,55 @@ describe('webmux in a browser', () => {
     // `packed/` because the archive keeps the packed directory as its top-level
     // entry, so extracting reproduces the tree rather than spilling it.
     assert.equal(readFileSync(written, 'utf8'), 'nested content')
+  })
+
+  it('offers a folder upload wired to the directory attribute', async () => {
+    await page.locator('[data-toolbar="upload-folder"]').waitFor({ timeout: 15_000 })
+    // The attribute is the whole feature: without it the browser opens a plain
+    // file picker and the button silently degrades to the file one.
+    assert.equal(await page.locator('[data-upload="folder"]').getAttribute('webkitdirectory'), '')
+  })
+
+  it('uploads a nested tree, creating directories and overwriting', async () => {
+    // Driven through the *file* input, for two reasons that are both about
+    // this environment rather than the app. The directory picker cannot be
+    // exercised at all here — Chromium's `DOM.setFileInputFiles` with a
+    // directory populates nothing (checked against a bare page: Playwright
+    // times out on the input event and a raw CDP call leaves the FileList
+    // empty) — and Playwright refuses file payloads on a `webkitdirectory`
+    // input outright.
+    //
+    // The two inputs share one manifest builder, and these payloads carry the
+    // same relative paths `webkitRelativePath` supplies from a real pick, so
+    // what runs end to end is our whole side of it: manifest → `mkdir -p` →
+    // per-file upload → the files on disk.
+    const rows = page.locator('ul[aria-label="文件列表"] li')
+    mkdirSync(path.join(filesRoot, 'tree'), { recursive: true })
+    writeFileSync(path.join(filesRoot, 'tree', 'top.txt'), 'old contents')
+
+    await page.setInputFiles('[data-upload="files"]', [
+      { name: 'tree/top.txt', mimeType: 'text/plain', buffer: Buffer.from('new contents') },
+      { name: 'tree/sub/deep.txt', mimeType: 'text/plain', buffer: Buffer.from('deep contents') },
+    ])
+
+    await rows.filter({ hasText: 'tree' }).waitFor({ timeout: 30_000 })
+
+    const deep = path.join(filesRoot, 'tree', 'sub', 'deep.txt')
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline && !existsSync(deep)) await delay(200)
+    assert.equal(readFileSync(deep, 'utf8'), 'deep contents', 'the nested tree must survive')
+
+    // Polled to the new bytes rather than read once: the earlier read would
+    // pass against the old contents and prove nothing about the overwrite.
+    const top = path.join(filesRoot, 'tree', 'top.txt')
+    const topDeadline = Date.now() + 30_000
+    while (
+      Date.now() < topDeadline &&
+      (!existsSync(top) || readFileSync(top, 'utf8') !== 'new contents')
+    ) {
+      await delay(200)
+    }
+    assert.equal(readFileSync(top, 'utf8'), 'new contents', 'an existing file is overwritten')
   })
 
   it('shares a file with someone who has no account at all', async () => {

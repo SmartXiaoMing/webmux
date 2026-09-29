@@ -22,6 +22,22 @@ const STORAGE_KEY = 'webmux.uploads.v1'
 
 export type UploadState = 'queued' | 'uploading' | 'done' | 'failed' | 'cancelled'
 
+/** Which drop/pick a task came from, so the tray can group one batch into a row. */
+export interface BatchInfo {
+  id: string
+  label: string
+}
+
+export interface UploadOptions {
+  batch?: BatchInfo | null
+  /**
+   * Path within the batch, shown instead of the bare name. A folder upload is
+   * mostly same-named files (`index.js`, `README.md`), so the name alone says
+   * nothing about which one is which.
+   */
+  relPath?: string | null
+}
+
 export interface UploadTask {
   /** Local identity, stable across a reload so progress survives one. */
   readonly key: string
@@ -29,6 +45,8 @@ export interface UploadTask {
   readonly size: number
   /** Destination path on the server. */
   readonly target: string
+  readonly relPath: string | null
+  readonly batch: BatchInfo | null
   state: UploadState
   /** Bytes the server has acknowledged, plus what is in flight. */
   bytesSent: number
@@ -236,9 +254,18 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
 // Store
 // ---------------------------------------------------------------------------
 
-/** Identifies a file across a reload, where no `File` object survives. */
-function fingerprint(file: File): string {
-  return `${file.name} ${file.size} ${file.lastModified}`
+/**
+ * Identifies an upload across a reload, where no `File` object survives.
+ *
+ * The destination is part of the identity, not just the file. Name, size and
+ * mtime are not unique: a folder upload is full of files sharing all three
+ * (every `node_modules/<pkg>/package.json` in a dropped project), and without
+ * the target they collapse into a
+ * single task — one row in the tray, one of them never uploaded at all, and a
+ * resume that could retarget remembered bytes at the wrong path.
+ */
+export function taskKey(file: File, target: string): string {
+  return `${target}\x00${file.name}\x00${file.size}\x00${file.lastModified}`
 }
 
 interface RememberedUpload {
@@ -333,27 +360,92 @@ class UploadStore {
   }
 
   /**
+   * Registers a task before its turn comes.
+   *
+   * A folder upload can be thousands of files behind a pool that only runs a
+   * few at a time; without this the tray would stay empty for the first
+   * minute and then fill up in a trickle. The notification is deliberately
+   * the coalesced one — reserving a thousand files with an immediate emit is a
+   * thousand full re-renders.
+   */
+  reserve(file: File, target: string, opts: UploadOptions = {}): void {
+    const key = taskKey(file, target)
+    if (this.tasks.has(key)) return
+    this.tasks.set(key, {
+      key,
+      name: file.name,
+      size: file.size,
+      target,
+      relPath: opts.relPath ?? null,
+      batch: opts.batch ?? null,
+      state: 'queued',
+      bytesSent: 0,
+      uploadId: null,
+      error: null,
+    })
+    this.emit()
+  }
+
+  /**
+   * Marks a task failed without ever having uploaded it.
+   *
+   * Used for the files a batch cannot even start on — a directory that could
+   * not be created. They must be visible: a file that is quietly absent from
+   * the tray is a file the user believes was uploaded.
+   */
+  fail(file: File, target: string, opts: UploadOptions, message: string): void {
+    const key = taskKey(file, target)
+    const task = this.tasks.get(key) ?? {
+      key,
+      name: file.name,
+      size: file.size,
+      target,
+      relPath: opts.relPath ?? null,
+      batch: opts.batch ?? null,
+      state: 'failed' as const,
+      bytesSent: 0,
+      uploadId: null,
+      error: null,
+    }
+    task.state = 'failed'
+    task.error = message
+    this.tasks.set(key, task)
+    this.emit()
+  }
+
+  stateOf(file: File, target: string): UploadState | null {
+    return this.tasks.get(taskKey(file, target))?.state ?? null
+  }
+
+  /**
    * Uploads `file` to `target`.
    *
    * Resumes automatically when this exact file was uploaded before and the
    * server still holds the session — the client asks what is missing rather
    * than assuming it must start over.
    */
-  async upload(file: File, target: string): Promise<void> {
-    const key = fingerprint(file)
+  async upload(file: File, target: string, opts: UploadOptions = {}): Promise<void> {
+    const key = taskKey(file, target)
     const existing = this.tasks.get(key)
-    if (existing && (existing.state === 'uploading' || existing.state === 'queued')) return
+    // Only a *running* upload makes this a no-op. A settled one is a retry, and
+    // a `queued` one is a row this batch reserved before its turn came.
+    if (existing?.state === 'uploading') return
 
-    const task: UploadTask = {
+    const task: UploadTask = existing ?? {
       key,
       name: file.name,
       size: file.size,
       target,
+      relPath: opts.relPath ?? null,
+      batch: opts.batch ?? null,
       state: 'uploading',
       bytesSent: 0,
       uploadId: null,
       error: null,
     }
+    task.state = 'uploading'
+    task.error = null
+    task.bytesSent = 0
     this.tasks.set(key, task)
     this.emit(true)
 
