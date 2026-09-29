@@ -465,10 +465,19 @@ ok "配置 ${ENV_FILE}"
 
 step "启动服务…"
 systemctl daemon-reload
-systemctl enable --now "${SERVICE_NAME}" >/dev/null 2>&1 || {
+
+# enable and restart, not `enable --now`. On an upgrade the unit is already
+# active, and `--now` only starts what is stopped — the freshly built code
+# would sit on disk while the old process kept serving, and the upgrade would
+# report success while changing nothing. `restart` covers both cases: it starts
+# a unit that is down and replaces one that is up.
+if ! systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1; then
+  warn "开机自启没设置成功；服务仍会启动，但机器重启后需要手动拉起"
+fi
+systemctl restart "${SERVICE_NAME}" >/dev/null 2>&1 || {
   warn "服务启动失败，最近日志："
   journalctl -u "${SERVICE_NAME}" -n 20 --no-pager >&2 || true
-  die "systemctl enable --now ${SERVICE_NAME} 失败"
+  die "systemctl restart ${SERVICE_NAME} 失败"
 }
 
 # Give it a moment, then confirm it is actually serving rather than merely
