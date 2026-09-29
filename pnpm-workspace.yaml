@@ -1,0 +1,10 @@
+packages:
+  - 'packages/*'
+
+# pnpm blocks lifecycle scripts by default. These three need their native
+# builds to run: node-pty compiles a PTY binding, better-sqlite3 compiles the
+# SQLite binding, esbuild fetches its platform binary.
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  node-pty: true

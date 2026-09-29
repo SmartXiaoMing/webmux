@@ -1,0 +1,309 @@
+@import 'tailwindcss';
+@import '@xterm/xterm/css/xterm.css';
+
+/**
+ * Design tokens.
+ *
+ * A deliberately quiet palette — the terminal output is the only thing on
+ * screen that should attract the eye, so chrome stays low-contrast and
+ * desaturated.
+ */
+@theme {
+  --color-ink: #0b0e14;
+  --color-surface: #11151d;
+  --color-surface-raised: #171c26;
+  --color-line: #222836;
+  --color-line-strong: #2e3646;
+
+  --color-body: #c3ccda;
+  --color-muted: #6d7889;
+  --color-faint: #4a5364;
+
+  --color-accent: #5aa9ff;
+  --color-accent-dim: #2b5f96;
+  --color-danger: #ff6b6b;
+  --color-warn: #ffb454;
+  --color-ok: #5fd38d;
+
+  /* Foreground on an accent-filled control, and the accent's hover state.
+     Tokens rather than the literals they used to be, because both have to be
+     restated for a light background. */
+  --color-on-accent: #06121f;
+  --color-accent-hover: #7cbcff;
+
+  --font-mono:
+    'JetBrains Mono', 'SF Mono', 'Menlo', 'DejaVu Sans Mono', 'Consolas', ui-monospace, monospace;
+}
+
+/**
+ * Height utilities.
+ *
+ * `dvh` rather than `vh`: on mobile Safari and Chrome, `100vh` includes the
+ * area behind the collapsing address bar, so a `100vh` layout is permanently
+ * taller than the screen and its bottom edge — where the tab bar lives — is
+ * unreachable.
+ */
+@utility h-screen-safe {
+  height: 100dvh;
+  height: 100svh;
+}
+
+/**
+ * Height that also tracks the on-screen keyboard.
+ *
+ * The JS side keeps `--app-height` in sync with `visualViewport`, which is the
+ * only reliable signal for the keyboard: `window.innerHeight` does not change
+ * on iOS when the keyboard opens.
+ */
+@utility h-viewport {
+  height: var(--app-height, 100dvh);
+}
+
+@layer base {
+  /**
+   * Dark is the base, light is an override.
+   *
+   * Dark has to be the `@theme` base rather than the other way round: Tailwind
+   * inlines the base values as literal fallbacks for opacity-modified classes
+   * (`.bg-ink/95`), so inverting the two would leave every one of those with a
+   * light literal.
+   *
+   * Overriding the custom properties works because every generated utility
+   * references them by `var()`. The one exception is those same opacity
+   * modifiers, which keep a literal fallback for browsers without `color-mix`
+   * — universally available since 2023, so not worth contorting the CSS over.
+   *
+   * `color-scheme` is not optional: without it the iOS soft keyboard renders
+   * light under a dark page, and UA form controls, `select` popups and the
+   * caret all follow the wrong scheme.
+   */
+  :root {
+    color-scheme: dark;
+  }
+
+  :root[data-theme='light'] {
+    color-scheme: light;
+
+    --color-ink: #f6f7f9;
+    --color-surface: #ffffff;
+    /* Not "brighter than surface" — there is nothing brighter than white. In
+       light mode a raised surface is a tint, so it reads as lifted only
+       because `surface` is pure white next to it. */
+    --color-surface-raised: #eceff3;
+    --color-line: #e3e6eb;
+    --color-line-strong: #c8ced8;
+
+    --color-body: #1f2430;
+    --color-muted: #5b6575;
+    --color-faint: #8b94a3;
+
+    /* The dark accent (#5aa9ff) is 2.2:1 on white — unusable as text. */
+    --color-accent: #1f6feb;
+    --color-accent-dim: #a8c8f0;
+    --color-danger: #d1242f;
+    --color-warn: #9a6700;
+    --color-ok: #1a7f37;
+
+    --color-on-accent: #ffffff;
+    --color-accent-hover: #1a5fd0;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-ink);
+    color: var(--color-body);
+    font-family:
+      ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+      'Microsoft YaHei', sans-serif;
+    /* Terminal UIs are dragged around; text selection on chrome just gets in
+       the way. Re-enabled explicitly on the terminal itself. */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+
+  input,
+  textarea {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* Keep focus rings visible for keyboard navigation without the default glow. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .surface-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-line);
+    border-radius: 0.75rem;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    padding: 0.5rem 0.875rem;
+    transition:
+      background-color 120ms ease,
+      border-color 120ms ease,
+      color 120ms ease;
+    border: 1px solid transparent;
+    cursor: pointer;
+    /* Comfortable tap target on touch devices. */
+    min-height: 2.25rem;
+  }
+
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--color-accent);
+    color: var(--color-on-accent);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--color-accent-hover);
+  }
+
+  .btn-ghost {
+    color: var(--color-body);
+    border-color: var(--color-line);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    background: var(--color-surface-raised);
+    border-color: var(--color-line-strong);
+  }
+
+  .btn-danger {
+    color: var(--color-danger);
+    border-color: transparent;
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+  }
+
+  .field {
+    width: 100%;
+    background: var(--color-ink);
+    border: 1px solid var(--color-line);
+    border-radius: 0.5rem;
+    padding: 0.625rem 0.75rem;
+    color: var(--color-body);
+    font-size: 0.9375rem;
+    /* 16px prevents iOS Safari from zooming the page on focus. */
+    min-height: 2.75rem;
+  }
+
+  .field:focus {
+    outline: none;
+    border-color: var(--color-accent);
+  }
+
+  /* Accessory key bar buttons — compact, and readable at a glance while typing. */
+  .key {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.5rem;
+    height: 2.25rem;
+    padding: 0 0.5rem;
+    border-radius: 0.375rem;
+    border: 1px solid var(--color-line);
+    background: var(--color-surface-raised);
+    color: var(--color-body);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .key:active,
+  .key[data-active='true'] {
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    color: var(--color-on-accent);
+  }
+}
+
+/**
+ * xterm.js surface, and the touch-scroll overlay.
+ *
+ * xterm 6 has **no touch scrolling at all** — not poor touch scrolling, none.
+ * `.xterm-viewport` is not a scroll container: it is an empty, transparent,
+ * `position:absolute; inset:0` div. The 6.0 scroll model is VS Code's
+ * `SmoothScrollableElement`, rooted at the *screen* element, with the scroll
+ * position held in JavaScript — the DOM node's `scrollTop` is never written.
+ * So the overlay below is the mechanism, not a nicety.
+ *
+ * Two things worth knowing before editing this block:
+ *
+ *   - The scrollbar you actually see is xterm's own slider, painted from the
+ *     `scrollbarSlider*` keys of the xterm *theme object* (see `lib/theme.ts`)
+ *     and injected at a higher specificity than anything here. The
+ *     `::-webkit-scrollbar` rules that used to live in this block styled a
+ *     scrollbar that never moves.
+ *   - The overlay must never be `display:none`d or conditionally rendered.
+ *     That discards its layout box and resets `scrollTop` to 0, which fires a
+ *     scroll event, which drives the terminal to line 0 — and the app hides the
+ *     terminal exactly that way when you switch to the file view.
+ */
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
+.term-scroll {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Stop the gesture chaining out into the page's rubber-band. */
+  overscroll-behavior: contain;
+  /* Horizontal panning would tear the canvas sideways, and pinch-zoom was never
+     available anyway — the viewport meta sets maximum-scale=1. */
+  touch-action: pan-y;
+  /* Transparent to input until a touch is actually seen (see TerminalView), so
+     a mouse or trackpad keeps xterm's own selection behaviour. */
+  pointer-events: none;
+  scrollbar-width: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  /* Chrome's scroll anchoring would fight the programmatic scrollTop writes. */
+  overflow-anchor: none;
+  scroll-behavior: auto;
+  /* Deliberately no `-webkit-overflow-scrolling: touch`: obsolete since iOS 13
+     and a known source of fixed-position jank. */
+}
+
+.term-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.term-touch .term-scroll {
+  pointer-events: auto;
+}
+
+/* Let long-press selection work in the terminal even though the app shell
+   disables selection globally. */
+.xterm {
+  -webkit-user-select: text;
+  user-select: text;
+  padding: 2px 0 0 6px;
+}

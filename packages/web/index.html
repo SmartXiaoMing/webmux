@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- viewport-fit=cover lets the terminal extend under the iPhone home
+         indicator; the layout compensates with safe-area padding. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="dark light" />
+    <!-- Matches the header, not the page background: this is the tinted strip
+         directly above the header, and the script below keeps it in step. -->
+    <meta name="theme-color" content="#11151d" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!-- iOS 17.4+ prefers the standard name; the Apple one is kept for older. -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <title>webmux</title>
+    <script>
+      /*
+       * Sets the theme before the first paint.
+       *
+       * A plain synchronous script, not `type="module"` (modules are deferred,
+       * and at least one paint happens first) and not `src` (an extra network
+       * round trip). This cannot be a React effect for the same reason: by the
+       * time the module graph has loaded and rendered, the browser has already
+       * painted the wrong colours.
+       *
+       * `data-theme` is never left unset — the catch branch sets it — which is
+       * why the stylesheet has no `prefers-color-scheme` block. The matchMedia
+       * call below *is* the system-preference handling.
+       */
+      ;(function () {
+        try {
+          var choice = localStorage.getItem('webmux.theme')
+          if (choice !== 'light' && choice !== 'dark') {
+            choice = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+          }
+          document.documentElement.dataset.theme = choice
+          var meta = document.querySelector('meta[name="theme-color"]')
+          if (meta) meta.setAttribute('content', choice === 'light' ? '#ffffff' : '#11151d')
+        } catch (e) {
+          // localStorage throws in some privacy configurations. Dark is the
+          // default and the common case, so falling back to it is correct.
+          document.documentElement.dataset.theme = 'dark'
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

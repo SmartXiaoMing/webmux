@@ -1,0 +1,22 @@
+{
+  "name": "webmux",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser terminal with tmux-style session persistence, plus file management and share links",
+  "packageManager": "pnpm@12.6.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "postinstall": "node scripts/fix-pty-permissions.mjs",
+    "dev": "pnpm -r --parallel dev",
+    "dev:server": "pnpm --filter @webmux/server dev",
+    "dev:web": "pnpm --filter @webmux/web dev",
+    "build": "pnpm --filter @webmux/web build",
+    "start": "pnpm --filter @webmux/server start",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r --workspace-concurrency=1 test",
+    "icons": "node scripts/make-icons.mjs"
+  }
+}

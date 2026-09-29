@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# runtime state — sqlite db, jwt secret, generated config
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+.env
+.env.local
+
+.DS_Store
+*.log

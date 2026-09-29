@@ -1,0 +1,70 @@
+# systemd unit for webmux.
+#
+#   sudo cp deploy/webmux.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now webmux
+#
+# Adjust User= and WorkingDirectory= to match where you installed it, and make
+# sure that user owns the checkout — the data directory (default ~/.webmux) is
+# created 0700 and holds both the password hash and the token-signing secret.
+
+[Unit]
+Description=webmux — browser terminal with tmux-backed session persistence
+Documentation=https://github.com/SmartXiaoMing/webmux
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=webmux
+Group=webmux
+WorkingDirectory=/opt/webmux
+
+# The script execs node directly, so this PID *is* the server and receives
+# SIGTERM itself. See the comment at the bottom of start.sh.
+ExecStart=/opt/webmux/start.sh
+
+# systemd starts services with a minimal PATH that does not include a node
+# installed by nvm, asdf, fnm, volta or similar — the symptom is a bare
+# "找不到 node" from start.sh on a machine where `node -v` works fine in your
+# shell. Point it at the real bin directory, e.g.:
+#
+#   Environment=PATH=/home/webmux/.nvm/versions/node/v22.23.1/bin:/usr/local/bin:/usr/bin:/bin
+#
+# (The build also needs pnpm; if you would rather not put it on the service's
+# PATH, run `./start.sh` once by hand after each deploy so the service always
+# finds a current dist/.)
+
+# Optional overrides: WEBMUX_PORT, WEBMUX_HOST, WEBMUX_DATA_DIR,
+# WEBMUX_TRUST_PROXY, ... The leading `-` means "start anyway if absent".
+EnvironmentFile=-/etc/webmux.env
+
+Restart=always
+RestartSec=5
+
+# ---------------------------------------------------------------------------
+# The two settings below are load-bearing, and both are non-default.
+# ---------------------------------------------------------------------------
+
+# KillMode=process, NOT the default control-group.
+#
+# The tmux server is started *by* webmux and therefore lives in this unit's
+# cgroup. Under the default KillMode, `systemctl restart webmux` would signal
+# the whole cgroup — killing tmux and every shell inside it, which is precisely
+# the thing webmux exists to prevent. With `process`, only the server is
+# signalled; tmux survives and the restarted server re-adopts its sessions.
+KillMode=process
+
+# Do NOT add PrivateTmp=yes (nor PrivateTmp on any drop-in).
+#
+# tmux places its socket under /tmp. A private /tmp is a fresh namespace per
+# invocation, so a restarted webmux would look in the new /tmp, find no socket,
+# and conclude that every session had vanished — while the tmux server and its
+# shells keep running, now unreachable and unkillable through webmux.
+#
+# For the same reason, do not enable ProtectSystem=strict with PrivateTmp-like
+# semantics: the server must be able to reach the tmux socket, the data
+# directory and the configured file roots.
+
+[Install]
+WantedBy=multi-user.target

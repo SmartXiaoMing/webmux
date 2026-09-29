@@ -1,0 +1,34 @@
+{
+  "name": "@webmux/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test --test-timeout=120000 \"test/*.mjs\""
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/static": "^8.3.0",
+    "@fastify/websocket": "^11.3.1",
+    "@webmux/shared": "workspace:*",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
+    "better-sqlite3": "^13.0.3",
+    "fastify": "^5.12.5",
+    "jose": "^6.2.12",
+    "node-pty": "^1.1.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "ws": "^8.18.0"
+  }
+}
