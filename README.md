@@ -100,6 +100,17 @@ webmux 把它当成要正面解决的问题 —— 短暂断网**只补发缺失
 ./start.sh          # 预检 → 装依赖 → 按需构建前端 → 启动，默认 http://localhost:8866
 ```
 
+**装成系统服务**（服务器上的推荐姿势，一条命令）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SmartXiaoMing/webmux/main/install.sh | sudo bash
+```
+
+它会检查并装好依赖（tmux 走发行版仓库；Node 太旧时解开官方压缩包放进**自己的安装目录**，
+不动系统里的 node，也不加第三方 apt 源）、建服务用户、把源码放到 `/opt/webmux`、
+构建前端、写好 systemd 单元并启动。幂等，重跑就是升级；`--uninstall` 卸载。
+详见[部署到服务器](#部署到服务器)。
+
 `start.sh` 只是把下面三步串起来并加上检查：Node 版本、tmux 是否存在、依赖是否需要安装
 （`node_modules` 缺失，或 lockfile 比它新）、前端是否需要重建（`dist` 缺失，或源码比它新）。
 **它不是必需的** —— 手动那三步同样可以：
@@ -188,6 +199,18 @@ location / {
 
 ### 做成 systemd 服务
 
+**一条命令：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SmartXiaoMing/webmux/main/install.sh | sudo bash
+```
+
+已经 clone 下来的话，在仓库里跑 `sudo ./install.sh` 也一样。常用参数：
+`--prefix /opt/webmux`、`--user webmux`、`--port 8866`、`--no-deps`（只检查依赖）、
+`--uninstall`。脚本是幂等的 —— 重跑就是就地升级。
+
+**它具体做了什么**，以及不想用脚本时的手动步骤：
+
 仓库里带了一份可直接用的单元文件 `deploy/webmux.service`。完整流程：
 
 **1. 装依赖** —— Node 22+、tmux、pnpm：
@@ -247,11 +270,13 @@ WEBMUX_TRUST_PROXY=true
 **7. 升级**：
 
 ```bash
+# 用 install.sh 装的：重跑一次即可（它会重新拉取、构建、重启）
+curl -fsSL https://raw.githubusercontent.com/SmartXiaoMing/webmux/main/install.sh | sudo bash
+
+# 手动装的：拉代码后重启，start.sh 会在启动时按需重装依赖、重建前端
 sudo -u webmux git -C /opt/webmux pull
 sudo systemctl restart webmux
 ```
-
-`start.sh` 启动时会按需重装依赖、重建前端，所以 pull 完直接 restart 就够了。
 
 **重启服务不会丢会话** —— 这正是整套设计的重点。`systemctl restart webmux`
 之后，tmux 服务端与里面的进程原封不动，新的 webmux 进程启动时把它们接管回来。
