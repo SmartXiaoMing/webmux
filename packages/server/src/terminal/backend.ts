@@ -20,6 +20,8 @@ export interface SessionInfo {
   createdAt: number
   /** False once the shell inside has exited. */
   running: boolean
+  /** The session this was opened from, if any. Survives a webmux restart. */
+  parentId: string | null
 }
 
 export interface CreateOptions {
@@ -28,6 +30,7 @@ export interface CreateOptions {
   title: string
   cols: number
   rows: number
+  parentId: string | null
 }
 
 export interface AttachedPty {

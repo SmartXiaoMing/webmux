@@ -963,18 +963,66 @@ describe('localisation and control changes', () => {
     await page.locator('[data-font-size="larger"]').click()
   })
 
+  it('hides dotfiles until they are asked for', async () => {
+    // A dotfile this test owns, so the shared fixture keeps meaning what the
+    // other file tests expect of it.
+    const dotfile = path.join(filesRoot, '.hidden-fixture')
+    writeFileSync(dotfile, 'dotfile')
+
+    try {
+      await page.locator('header button:has-text("文件")').click()
+      const rows = page.locator('ul[aria-label="文件列表"] li')
+      await rows.first().waitFor({ timeout: 15_000 })
+      const dotRows = rows.filter({ hasText: '.hidden-fixture' })
+
+      assert.equal(await dotRows.count(), 0, 'dotfiles should be hidden by default')
+
+      await page.locator('[data-toolbar="hidden"]').click()
+      await dotRows.waitFor({ timeout: 15_000 })
+
+      // Back off again, which is also the state the next test starts from.
+      await page.locator('[data-toolbar="hidden"]').click()
+      await page.waitForFunction(
+        () =>
+          !Array.from(document.querySelectorAll('ul[aria-label="文件列表"] li')).some((li) =>
+            li.textContent?.includes('.hidden-fixture'),
+          ),
+        undefined,
+        { timeout: 10_000 },
+      )
+    } finally {
+      rmSync(dotfile, { force: true })
+    }
+  })
+
   it('keeps a favourite across a reload, so it is not just in memory', async () => {
     await page.locator('header button:has-text("文件")').click()
     await page.waitForSelector('ul[aria-label="文件列表"] li', { timeout: 15_000 })
 
     await page.locator('[data-toolbar="favorite"]').click()
+
+    // 收藏目录 is collapsed by default, so its rows do not exist until it is
+    // opened. The count in the header is what makes the collapsed state safe:
+    // the star just landed, and "(1)" is how the sidebar says so.
+    const toggle = page.locator('aside [data-toggle="favorites"]')
+    await page.waitForFunction(
+      () => document.querySelector('aside [data-toggle="favorites"]')?.textContent?.includes('(1)'),
+      undefined,
+      { timeout: 15_000 },
+    )
+    await toggle.click()
+
     const places = page.locator('aside [data-place]')
     await places.first().waitFor({ timeout: 15_000 })
     const starred = await places.first().getAttribute('data-place')
 
-    // Unstar first, so the reload assertion cannot pass on a stale in-memory
-    // value that happened to survive.
+    // Reload, so the assertion cannot pass on a stale in-memory value that
+    // happened to survive.
     await page.reload()
+    // Re-opened after the reload: the collapsed state is per mount, on purpose
+    // (see the note in FavoritesSection), so this also pins that a reload
+    // returns to the documented default.
+    await page.locator('aside [data-toggle="favorites"]').click()
     await page.waitForSelector('aside [data-place]', { timeout: 15_000 })
     assert.equal(
       await page.locator('aside [data-place]').first().getAttribute('data-place'),
@@ -989,6 +1037,99 @@ describe('localisation and control changes', () => {
       starred,
       { timeout: 10_000 },
     )
+  })
+
+  it('builds a session tree, one level deep, named after its directory', async () => {
+    // Polls the API rather than the DOM: the parent link is the contract the
+    // tree is drawn from, and a DOM wait would pass or fail on a render that
+    // has not happened yet.
+    const waitForSession = async (predicate, timeoutMs = 20_000) => {
+      const deadline = Date.now() + timeoutMs
+      let seen = []
+      while (Date.now() < deadline) {
+        seen = await (await page.request.get(`${BASE}/api/sessions`)).json()
+        const found = seen.find(predicate)
+        if (found) return found
+        await delay(200)
+      }
+      throw new Error(
+        `no session matched; have ${JSON.stringify(seen.map((s) => [s.title, s.parentId]))}`,
+      )
+    }
+
+    await page.locator('header button:has-text("终端")').click()
+    const newButtons = page.locator('aside [data-session-new]')
+    await newButtons.first().waitFor({ timeout: 15_000 })
+
+    const parentId = await newButtons.first().getAttribute('data-session-new')
+    const parentRow = page.locator(`[data-session-new="${parentId}"]`)
+    /** The rows nested inside a given session's own <li> — i.e. its children. */
+    const childrenOf = (id) =>
+      page.locator(`[data-session-new="${id}"]`).locator('xpath=ancestor::li[1]//ul//*[@data-session-new]')
+
+    const created = []
+    try {
+      await parentRow.click()
+      const child = await waitForSession((s) => s.parentId === parentId)
+      created.push(child.id)
+
+      const parent = await waitForSession((s) => s.id === parentId)
+      assert.equal(child.cwd, parent.cwd, 'the child starts in the parent directory')
+
+      // Indentation is the nesting itself: a second-level row is a `li` inside
+      // a `ul` inside a `li`. Asserting on the structure rather than on a class
+      // name is what makes "one level deep" checkable.
+      const nestedIds = async () =>
+        (
+          await page.evaluate(() =>
+            [...document.querySelectorAll('aside ul li ul li [data-session-new]')].map((el) =>
+              el.getAttribute('data-session-new'),
+            ),
+          )
+        ).sort()
+
+      await page.waitForFunction(
+        (n) => document.querySelectorAll('aside ul li ul li [data-session-new]').length === n,
+        1,
+        { timeout: 15_000 },
+      )
+      assert.deepEqual(await nestedIds(), [child.id])
+
+      // From the child, a new session joins the same root rather than nesting
+      // one level deeper.
+      await page.locator(`[data-session-new="${child.id}"]`).click()
+      const sibling = await waitForSession((s) => s.id !== child.id && s.parentId === parentId)
+      created.push(sibling.id)
+
+      await page.waitForFunction(
+        (n) => document.querySelectorAll('aside ul li ul li [data-session-new]').length === n,
+        2,
+        { timeout: 15_000 },
+      )
+      assert.deepEqual(await nestedIds(), [child.id, sibling.id].sort(), 'both live under the same root')
+      assert.equal(
+        await page.locator('aside ul li ul li ul li').count(),
+        0,
+        'nothing nests below a child — the tree is one level deep',
+      )
+
+      // Rename, since a session named after its directory is a starting point
+      // rather than a decision.
+      await page.locator(`[data-session-rename="${sibling.id}"]`).click()
+      const input = page.locator('aside input.field')
+      await input.waitFor({ timeout: 10_000 })
+      await input.fill('部署机')
+      await input.press('Enter')
+      await page.waitForFunction(
+        () => document.querySelector('aside')?.textContent?.includes('部署机') === true,
+        undefined,
+        { timeout: 10_000 },
+      )
+      const renamed = await waitForSession((s) => s.id === sibling.id)
+      assert.equal(renamed.title, '部署机', 'the rename reaches the server')
+    } finally {
+      for (const id of created) await page.request.delete(`${BASE}/api/sessions/${id}`)
+    }
   })
 
   it('shows a row menu fully even on the last row', async () => {

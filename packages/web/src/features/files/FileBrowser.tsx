@@ -73,7 +73,10 @@ export function FileBrowser({
 
   const [sort, setSort] = useState<FsSort>('name')
   const [order, setOrder] = useState<'asc' | 'desc'>('asc')
-  const [showHidden, setShowHidden] = useState(true)
+  // Off by default: a directory full of dotfiles — `.git`, `.next`, an editor's
+  // state — buries the handful of entries actually being looked for. The
+  // tooltip still names the path, so nothing is hidden irrecoverably.
+  const [showHidden, setShowHidden] = useState(false)
 
   /** Null when not creating; otherwise what the inline "new…" row will make. */
   const [creating, setCreating] = useState<'dir' | 'file' | null>(null)

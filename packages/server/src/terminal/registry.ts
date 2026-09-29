@@ -28,6 +28,8 @@ export interface CreateSessionInput {
   cwd?: string | undefined
   cols?: number | undefined
   rows?: number | undefined
+  /** The session this is being opened from, if the user opened it from one. */
+  parentId?: string | undefined
 }
 
 export interface SessionRegistryOptions {
@@ -89,6 +91,10 @@ export class SessionRegistry {
           rows: 24,
           scrollbackLines: this.config.scrollbackLines,
           ringBufferBytes: this.config.ringBufferBytes,
+          // Read back from tmux, so the tree survives a webmux restart. A
+          // parent that did not survive is left as-is here and shows up as a
+          // root in the client, which is where that case is handled.
+          parentId: info.parentId,
         },
         (s, exit) => this.handleExit(s, exit),
       )
@@ -98,6 +104,26 @@ export class SessionRegistry {
 
     if (adopted > 0) log.info(`adopted ${adopted} existing session(s)`)
     return adopted
+  }
+
+  /**
+   * Resolves the session a new one should hang off.
+   *
+   * The tree is deliberately one level deep. Opening a shell from a root makes
+   * a child of it; opening one from that child joins the *same* root rather
+   * than nesting further, so a session created from a child lands beside it.
+   * Without the flattening, a habit of opening a shell from the shell you are
+   * in would grow an unbounded staircase that a 288px sidebar cannot show.
+   *
+   * An unknown or missing parent yields a root: the parent may have been killed
+   * while this request was in flight, and a session that cannot be placed is
+   * better at the top level than invisible.
+   */
+  private resolveParent(parentId: string | undefined): string | null {
+    if (!parentId) return null
+    const parent = this.sessions.get(parentId)
+    if (!parent) return null
+    return parent.parentId ?? parent.id
   }
 
   async create(input: CreateSessionInput = {}): Promise<Session> {
@@ -118,6 +144,7 @@ export class SessionRegistry {
         rows: input.rows ?? 24,
         scrollbackLines: this.config.scrollbackLines,
         ringBufferBytes: this.config.ringBufferBytes,
+        parentId: this.resolveParent(input.parentId),
       },
       (s, exit) => this.handleExit(s, exit),
     )

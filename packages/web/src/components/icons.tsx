@@ -141,6 +141,42 @@ export function StarIcon({ size, filled = false }: IconProps & { filled?: boolea
   )
 }
 
+/** Open a new session rooted at this one's directory. */
+export function PlusIcon({ size }: IconProps): React.JSX.Element {
+  return (
+    <Svg size={size}>
+      <path d="M12 5v14M5 12h14" />
+    </Svg>
+  )
+}
+
+export function PencilIcon({ size }: IconProps): React.JSX.Element {
+  return (
+    <Svg size={size}>
+      <path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17Z" />
+      <path d="M14.5 6.5 17.5 9.5" />
+    </Svg>
+  )
+}
+
+/**
+ * Public share links.
+ *
+ * The three-nodes glyph rather than an arrow out of a box: the box-and-arrow
+ * shape already means "upload" in the file toolbar, and two icons that look
+ * alike in the same app is worse than one that needs a tooltip.
+ */
+export function ShareIcon({ size }: IconProps): React.JSX.Element {
+  return (
+    <Svg size={size}>
+      <circle cx="6" cy="12" r="2.5" />
+      <circle cx="17.5" cy="6" r="2.5" />
+      <circle cx="17.5" cy="18" r="2.5" />
+      <path d="m8.3 10.8 6.9-3.6M8.3 13.2l6.9 3.6" />
+    </Svg>
+  )
+}
+
 /** Recently opened directories: a clock face wound back. */
 export function HistoryIcon({ size }: IconProps): React.JSX.Element {
   return (

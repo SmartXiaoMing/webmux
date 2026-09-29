@@ -54,6 +54,11 @@ export interface SessionOptions {
   rows: number
   scrollbackLines: number
   ringBufferBytes: number
+  /**
+   * Set once, at creation: which session this one was opened from. Null means
+   * it stands on its own.
+   */
+  parentId: string | null
 }
 
 export interface SessionExit {
@@ -78,6 +83,8 @@ export interface SessionExit {
  */
 export class Session {
   readonly id: string
+  /** Immutable after construction — see the field on SessionOptions. */
+  readonly parentId: string | null
   private title: string
   private cwd: string
   /**
@@ -115,6 +122,7 @@ export class Session {
     private readonly onExit: (session: Session, info: SessionExit) => void,
   ) {
     this.id = opts.id
+    this.parentId = opts.parentId
     this.title = opts.title
     this.cwd = opts.cwd
     // Seeded from the creation directory rather than left empty: both paths
@@ -155,6 +163,7 @@ export class Session {
       title: this.title,
       cwd: this.cwd,
       liveCwd: this.liveCwd,
+      parentId: this.parentId,
       cols: this.cols,
       rows: this.rows,
       createdAt: this.createdAt,
@@ -193,6 +202,7 @@ export class Session {
       title: this.title,
       cols: this.cols,
       rows: this.rows,
+      parentId: this.parentId,
     })
 
     const { pty } = await this.backend.attach(this.id, this.cols, this.rows)

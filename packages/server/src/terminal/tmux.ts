@@ -218,7 +218,7 @@ export class TmuxBackend implements SessionBackend {
     }
   }
 
-  async create({ id, cwd, title, cols, rows }: CreateOptions): Promise<void> {
+  async create({ id, cwd, title, cols, rows, parentId }: CreateOptions): Promise<void> {
     await this.ensureServer()
     const name = this.toTmuxName(id)
 
@@ -243,6 +243,7 @@ export class TmuxBackend implements SessionBackend {
     }
 
     await this.setTitle(id, title)
+    await this.setParent(id, parentId)
   }
 
   async attach(id: string, cols: number, rows: number): Promise<AttachedPty> {
@@ -284,6 +285,21 @@ export class TmuxBackend implements SessionBackend {
   }
 
   /**
+   * Records which session this one was opened from.
+   *
+   * A tmux user option for the same reason the title is one: the tree has to
+   * survive a webmux restart, and tmux is the only thing that does. An empty
+   * value clears it, which is what a root session gets.
+   */
+  async setParent(id: string, parentId: string | null): Promise<void> {
+    try {
+      await this.run('set-option', '-t', this.toTmuxName(id), '@webmux_parent', parentId ?? '')
+    } catch (err) {
+      log.debug(`set-parent ${id}: ${(err as Error).message}`)
+    }
+  }
+
+  /**
    * Format string fields, in order. Paths are the only field that could in
    * principle contain the separator; a tmux session name cannot.
    */
@@ -292,6 +308,7 @@ export class TmuxBackend implements SessionBackend {
     '#{session_created}',
     '#{pane_current_path}',
     '#{@webmux_title}',
+    '#{@webmux_parent}',
     '#{pane_dead}',
   ].join(FS)
 
@@ -323,7 +340,7 @@ export class TmuxBackend implements SessionBackend {
     const out: SessionInfo[] = []
     for (const line of stdout.split('\n')) {
       if (!line.trim()) continue
-      const [name, created, cwd, title, dead] = line.split(FS)
+      const [name, created, cwd, title, parent, dead] = line.split(FS)
       if (!name || !name.startsWith(this.prefix)) continue
 
       const id = this.fromTmuxName(name)
@@ -335,6 +352,8 @@ export class TmuxBackend implements SessionBackend {
         // works in milliseconds.
         createdAt: Number(created ?? 0) * 1000 || Date.now(),
         running: dead !== '1',
+        // An unset option comes back as an empty string, not undefined.
+        parentId: parent?.trim() || null,
       })
     }
     return out

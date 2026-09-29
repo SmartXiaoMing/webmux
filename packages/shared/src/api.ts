@@ -51,6 +51,15 @@ export interface SessionSummary {
   liveCwd: string
   cols: number
   rows: number
+  /**
+   * The session this one was opened from, or null for a root.
+   *
+   * Always a *root* session when set: the tree is deliberately only one level
+   * deep, so opening a shell from a child joins that child's root rather than
+   * nesting further. A parent that no longer exists is treated as null by the
+   * client — see the tree building in SessionList.
+   */
+  parentId: string | null
   /** Number of attached WebSocket clients, across all browsers and devices. */
   clients: number
   createdAt: number
@@ -64,6 +73,8 @@ export const createSessionRequest = z.object({
   cwd: z.string().min(1).max(4096).optional(),
   cols: z.number().int().min(2).max(1000).optional(),
   rows: z.number().int().min(2).max(1000).optional(),
+  /** The session this is being opened from. The server resolves the root. */
+  parentId: z.string().min(1).max(128).optional(),
 })
 
 export type CreateSessionRequest = z.infer<typeof createSessionRequest>

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import type { QuickKey, SessionSummary } from '@webmux/shared'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { PlacesResponse, QuickKey, SessionSummary } from '@webmux/shared'
 import { ApiError, api } from './lib/api'
 import { useUploadTasks } from './lib/upload'
 import { useAppHeight, useWakeLock } from './lib/use-app-height'
@@ -7,9 +7,10 @@ import { TabBar, type WorkspaceView } from './components/TabBar'
 import { AuthPage } from './features/auth/AuthPage'
 import { FileBrowser } from './features/files/FileBrowser'
 import { SessionList } from './features/sessions/SessionList'
+import { FolderIcon, ShareIcon, TerminalIcon } from './components/icons'
 import { ThemeToggle } from './features/settings/ThemeToggle'
 import { FontSizeControl } from './features/settings/FontSizeControl'
-import { PlacesPanel } from './features/places/PlacesPanel'
+import { FavoritesSection, RecentSection } from './features/places/PlacesPanel'
 import { ShareList } from './features/shares/ShareList'
 import { TerminalView } from './features/terminal/TerminalView'
 import { QuickKeysDialog } from './features/terminal/QuickKeysDialog'
@@ -74,8 +75,20 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
   /** Bumped when a share is created, so the shares view is not stale. */
   const [sharesReloadKey, setSharesReloadKey] = useState(0)
 
-  /** Favourite paths, shared with the file browser so it need not refetch. */
-  const [favoritePaths, setFavoritePaths] = useState<readonly string[]>([])
+  /**
+   * Favourites and recent directories.
+   *
+   * Held here rather than inside the sidebar panels for two reasons: the file
+   * browser needs `favoritePaths` to draw its star without refetching, and the
+   * two panels are rendered on either side of the session list — so one
+   * component could not own the data without a second request.
+   */
+  const [places, setPlaces] = useState<PlacesResponse | null>(null)
+  const [placesError, setPlacesError] = useState<string | null>(null)
+  const favoritePaths = useMemo(
+    () => (places?.favorites ?? []).map((place) => place.path),
+    [places],
+  )
 
   /*
    * Quick keys are server-backed and shared across devices, so they live here
@@ -88,18 +101,17 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
   const [quickKeys, setQuickKeys] = useState<QuickKey[]>([])
   const [quickKeyLimits, setQuickKeyLimits] = useState({ maxKeys: 0 })
   const [quickKeysOpen, setQuickKeysOpen] = useState(false)
-  const [placesReloadKey, setPlacesReloadKey] = useState(0)
   /** A directory to push into the file browser; the nonce makes repeats work. */
   const [navigateTo, setNavigateTo] = useState<{ path: string; nonce: number } | null>(null)
 
   const refreshPlaces = useCallback(async (): Promise<void> => {
     try {
-      const result = await api.listPlaces()
-      setFavoritePaths(result.favorites.map((place) => place.path))
-    } catch {
+      setPlaces(await api.listPlaces())
+      setPlacesError(null)
+    } catch (err) {
       // The sidebar is a convenience; a failure here must not break the shell.
+      setPlacesError(err instanceof ApiError ? err.message : '无法加载目录列表')
     }
-    setPlacesReloadKey((n) => n + 1)
   }, [])
 
   useEffect(() => {
@@ -161,23 +173,33 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
     }
   }, [refresh])
 
-  const createSession = useCallback(async (cwd: string): Promise<void> => {
-    setBusy(true)
-    setError(null)
-    try {
-      const session = await api.createSession({ cwd })
-      setSessions((prev) => [session, ...prev])
-      setActiveId(session.id)
-      setExited(null)
-      setSidebarOpen(false)
-      // Asking for a terminal from the file browser means you want to be in it.
-      setView('terminal')
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : '创建会话失败')
-    } finally {
-      setBusy(false)
-    }
-  }, [])
+  const createSession = useCallback(
+    async (cwd: string, parentId?: string): Promise<void> => {
+      setBusy(true)
+      setError(null)
+      try {
+        const session = await api.createSession({
+          cwd,
+          title: sessionTitle(cwd, sessions),
+          ...(parentId !== undefined ? { parentId } : {}),
+        })
+        setSessions((prev) => [session, ...prev])
+        setActiveId(session.id)
+        setExited(null)
+        setSidebarOpen(false)
+        // Asking for a terminal from the file browser means you want to be in it.
+        setView('terminal')
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : '创建会话失败')
+      } finally {
+        setBusy(false)
+      }
+    },
+    // `sessions` is a dependency only so the default title can avoid a
+    // duplicate. Every caller passes an inline arrow, so this callback's
+    // identity is not something they key off.
+    [sessions],
+  )
 
   const killSession = useCallback(
     async (id: string): Promise<void> => {
@@ -253,6 +275,24 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
           </div>
         </div>
 
+        {/*
+          Order is 收藏目录 / 会话 / 已打开目录: the favourite shortcuts are the
+          thing you reach for first, the session list is the one that grows and
+          therefore takes the free space in the middle, and the recent list is
+          the "get back to where I was" fallback at the bottom.
+        */}
+        <FavoritesSection
+          places={places}
+          onOpenDirectory={openDirectory}
+          onUnstar={(path) => {
+            void api
+              .setFavorite(path, false)
+              .then(setPlaces)
+              .catch(() => void refreshPlaces())
+          }}
+          error={placesError}
+        />
+
         <SessionList
           sessions={sessions}
           activeId={activeId}
@@ -262,13 +302,12 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
           }}
           onKill={(id) => void killSession(id)}
           onRename={(id, title) => void renameSession(id, title)}
+          // The parent's *live* directory, not the one it was created in: "open
+          // another shell here" means here, now.
+          onNewSession={(parent) => void createSession(parent.liveCwd, parent.id)}
         />
 
-        <PlacesPanel
-          onOpenDirectory={openDirectory}
-          onSignOut={onSignOut}
-          reloadKey={placesReloadKey}
-        />
+        <RecentSection places={places} onOpenDirectory={openDirectory} />
 
         <div className="flex shrink-0 items-center justify-between gap-2 border-t border-line px-3 py-2">
           <ThemeToggle />
@@ -307,16 +346,26 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
             </span>
           )}
 
-          {/* Desktop switches views here; phones use the tab bar below. */}
+          {/*
+            Desktop switches views here; phones use the tab bar below. Same
+            icons as the tab bar — one icon per view, not per breakpoint.
+          */}
           <div className="hidden shrink-0 items-center gap-0.5 rounded border border-line p-0.5 md:flex">
-            {(['terminal', 'files', 'shares'] as const).map((id) => (
+            {(
+              [
+                { id: 'terminal', label: '终端', Icon: TerminalIcon },
+                { id: 'files', label: '文件', Icon: FolderIcon },
+                { id: 'shares', label: '分享', Icon: ShareIcon },
+              ] as const
+            ).map(({ id, label, Icon }) => (
               <button
                 key={id}
                 type="button"
                 onClick={() => setView(id)}
-                className={`rounded px-2 py-0.5 text-xs ${view === id ? 'bg-surface-raised text-body' : 'text-muted'}`}
+                className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs ${view === id ? 'bg-surface-raised text-body' : 'text-muted'}`}
               >
-                {id === 'terminal' ? '终端' : id === 'files' ? '文件' : '分享'}
+                <Icon size={13} />
+                {label}
               </button>
             ))}
           </div>
@@ -372,7 +421,7 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
             initialPath={active?.cwd ?? null}
             onSharesChanged={() => setSharesReloadKey((n) => n + 1)}
             navigateTo={navigateTo}
-            onDirectoryOpened={() => setPlacesReloadKey((n) => n + 1)}
+            onDirectoryOpened={() => void refreshPlaces()}
             favoritePaths={favoritePaths}
             onPlacesChanged={() => void refreshPlaces()}
             onOpenTerminal={(cwd) => void createSession(cwd)}
@@ -404,6 +453,26 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
       )}
     </div>
   )
+}
+
+/**
+ * A default name for a new session, taken from the directory it opens in.
+ *
+ * Numbered when that name is taken: two rows called `work` in the same tree is
+ * exactly the ambiguity the titles exist to remove. The user can rename it
+ * afterwards either way, which is why this does not ask first — opening a shell
+ * is a "right now" action.
+ */
+function sessionTitle(cwd: string, existing: SessionSummary[]): string {
+  // Trailing slashes and the root are the two shapes `split` gets wrong.
+  const base = cwd.split('/').filter(Boolean).pop() ?? '/'
+  const taken = new Set(existing.map((s) => s.title))
+  if (!taken.has(base)) return base
+
+  for (let n = 2; ; n += 1) {
+    const candidate = `${base} ${n}`
+    if (!taken.has(candidate)) return candidate
+  }
 }
 
 /** A fatal socket error may mean the session expired; re-check before assuming. */

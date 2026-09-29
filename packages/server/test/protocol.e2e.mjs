@@ -554,6 +554,50 @@ describe('terminal sessions', () => {
     )
   })
 
+  it('arranges sessions opened from each other as a one-level tree', async () => {
+    const open = async (title, parentId) => {
+      const res = await api('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ title, ...(parentId !== undefined ? { parentId } : {}) }),
+      })
+      assert.equal(res.status, 201, JSON.stringify(res.body))
+      return res.body
+    }
+
+    const created = []
+    try {
+      const root = await open('tree-root')
+      created.push(root.id)
+      assert.equal(root.parentId, null, 'a session opened from nothing is a root')
+
+      const child = await open('tree-child', root.id)
+      created.push(child.id)
+      assert.equal(child.parentId, root.id, 'a session opened from a root hangs off it')
+
+      // The rule the tree shape rests on: depth is capped at one level, so a
+      // session opened from a child joins that child's *root* and lands beside
+      // it. Without this, opening a shell from the shell you are in grows an
+      // unbounded staircase.
+      const sibling = await open('tree-sibling', child.id)
+      created.push(sibling.id)
+      assert.equal(sibling.parentId, root.id, 'a session opened from a child joins the same root')
+
+      // A parent that is gone yields a root rather than an orphan nobody can
+      // see — the session list renders a dangling parentId as a root for the
+      // same reason.
+      const orphan = await open('tree-orphan', 'nosuchsession')
+      created.push(orphan.id)
+      assert.equal(orphan.parentId, null, 'an unknown parent is ignored')
+
+      // And it survives the round trip through tmux, which is what makes the
+      // tree come back after a webmux restart.
+      const listed = await api('/api/sessions')
+      assert.equal(listed.body.find((s) => s.id === sibling.id).parentId, root.id)
+    } finally {
+      for (const id of created) await api(`/api/sessions/${id}`, { method: 'DELETE' })
+    }
+  })
+
   it('kills the session and removes the tmux session', async () => {
     const res = await api(`/api/sessions/${sessionId}`, { method: 'DELETE' })
     assert.equal(res.status, 204)

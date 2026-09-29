@@ -1,3 +1,5 @@
+import { FolderIcon, ShareIcon, TerminalIcon } from './icons'
+
 export type WorkspaceView = 'terminal' | 'files' | 'shares'
 
 /**
@@ -7,11 +9,16 @@ export type WorkspaceView = 'terminal' | 'files' | 'shares'
  * 分享 arrived with P3, and 设置 has nothing behind it yet — a tab that opens
  * onto nothing is a bug the user meets in the first minute. Adding an entry
  * here later is a one-line change, and the array exists so that stays true.
+ *
+ * Each tab carries its icon *and* its label. The icon is what makes the bar
+ * scannable at a glance — three words in a row read as a sentence — but the
+ * label stays, because three glyphs alone are only unambiguous to whoever
+ * picked them.
  */
-const TABS: Array<{ id: WorkspaceView; label: string }> = [
-  { id: 'terminal', label: '终端' },
-  { id: 'files', label: '文件' },
-  { id: 'shares', label: '分享' },
+const TABS: Array<{ id: WorkspaceView; label: string; Icon: typeof TerminalIcon }> = [
+  { id: 'terminal', label: '终端', Icon: TerminalIcon },
+  { id: 'files', label: '文件', Icon: FolderIcon },
+  { id: 'shares', label: '分享', Icon: ShareIcon },
 ]
 
 export interface TabBarProps {
@@ -39,6 +46,7 @@ export function TabBar({ active, onChange, busyUploads = 0 }: TabBarProps): Reac
               selected ? 'text-accent' : 'text-muted'
             }`}
           >
+            <tab.Icon size={16} />
             {tab.label}
             {tab.id === 'files' && busyUploads > 0 && (
               <span className="rounded-full bg-accent px-1.5 text-[10px] text-ink">{busyUploads}</span>
