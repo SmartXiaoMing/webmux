@@ -209,6 +209,13 @@ curl -fsSL https://raw.githubusercontent.com/SmartXiaoMing/webmux/main/install.s
 `--prefix /opt/webmux`、`--user webmux`、`--port 8866`、`--no-deps`（只检查依赖）、
 `--uninstall`。脚本是幂等的 —— 重跑就是就地升级。
 
+管道运行时参数要写在 `bash -s --` 之后（否则 bash 会把它们当成自己的参数）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SmartXiaoMing/webmux/main/install.sh \
+  | sudo bash -s -- --port 9000 --prefix /srv/webmux
+```
+
 **它具体做了什么**，以及不想用脚本时的手动步骤：
 
 仓库里带了一份可直接用的单元文件 `deploy/webmux.service`。完整流程：

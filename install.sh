@@ -47,6 +47,9 @@ usage() {
   cat <<'EOF'
 用法: sudo ./install.sh [选项]
 
+  通过管道运行时，参数要跟在 `bash -s --` 后面，否则 bash 会当成自己的参数：
+    curl -fsSL <url> | sudo bash -s -- --port 9000
+
   --prefix <目录>    安装位置（默认 /opt/webmux）
   --user <用户名>    运行服务的用户（默认 webmux）
   --port <端口>      监听端口（默认 8866）
