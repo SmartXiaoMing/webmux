@@ -10,7 +10,7 @@ import { after, before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { WebSocket } from 'ws'
@@ -519,6 +519,36 @@ describe('terminal sessions', () => {
       assert.equal(found.cwd, before.cwd)
     } finally {
       rmSync(scratch, { recursive: true, force: true })
+    }
+  })
+
+  it('starts somewhere usable when the requested directory is not', async () => {
+    // Reachable through the session tree: a new session inherits its parent's
+    // *live* directory, which is wherever the user has cd'd to — including a
+    // directory that has since been deleted. tmux does not fall back for an
+    // unusable `-c` (this was assumed for a long time and is not true): it
+    // starts a pane that never prints a prompt, so the symptom is a blank
+    // terminal and nothing at all in the logs.
+    const missing = path.join(tmpdir(), `webmux-not-here-${Date.now()}`)
+    const res = await api('/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'unusable-cwd', cwd: missing }),
+    })
+    assert.equal(res.status, 201, JSON.stringify(res.body))
+    const id = res.body.id
+
+    try {
+      assert.equal(res.body.cwd, homedir(), 'an unusable directory falls back to home')
+
+      // The assertion that matters is not "it rendered bytes" — a dead pane
+      // renders escape sequences too — but "the shell answers".
+      const client = new Client(id)
+      await client.connect()
+      const out = await run(client, 'echo CWD_RECOVERED', 'SENTINEL_CWD')
+      assert.match(out, /CWD_RECOVERED/)
+      client.close()
+    } finally {
+      await api(`/api/sessions/${id}`, { method: 'DELETE' })
     }
   })
 

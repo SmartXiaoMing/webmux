@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import { statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import type { SessionSummary } from '@webmux/shared'
 import type { Config } from '../config'
@@ -11,6 +12,34 @@ const log = logger.child('registry')
 /** Session names must survive a round-trip through tmux, so: alphanumerics only. */
 function newSessionId(): string {
   return randomBytes(5).toString('hex')
+}
+
+/**
+ * The directory a new session should start in.
+ *
+ * Checked here rather than trusted, and that is a change: the file browser's
+ * paths are already inside the jail and known to exist, but the session tree
+ * offers a session's *live* directory as the parent for a new one — and that is
+ * wherever the user has `cd`'d to, including a directory that has since been
+ * deleted. tmux does **not** fall back to `$HOME` for an unusable `-c` (the
+ * opposite was assumed here for a long time): it starts a pane that never
+ * produces a prompt, giving a blank terminal and nothing in any log.
+ *
+ * Falls back to the home directory rather than refusing. The user asked for a
+ * shell, not for a directory, and a shell they cannot open is worse than one
+ * that opens somewhere else — especially since the sidebar shows every
+ * session's live directory, so where it landed is on screen immediately.
+ */
+function resolveCwd(requested: string | undefined): string {
+  if (!requested) return homedir()
+
+  try {
+    if (statSync(requested).isDirectory()) return requested
+    log.warn(`session cwd ${requested} is not a directory — starting in ${homedir()}`)
+  } catch {
+    log.warn(`session cwd ${requested} does not exist — starting in ${homedir()}`)
+  }
+  return homedir()
 }
 
 /**
@@ -139,7 +168,7 @@ export class SessionRegistry {
       {
         id,
         title: input.title?.trim() || `session ${id}`,
-        cwd: input.cwd?.trim() || homedir(),
+        cwd: resolveCwd(input.cwd?.trim()),
         cols: input.cols ?? 80,
         rows: input.rows ?? 24,
         scrollbackLines: this.config.scrollbackLines,

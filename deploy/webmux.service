@@ -1,18 +1,30 @@
 # systemd unit for webmux.
 #
+# The step-by-step version of this is in README.md under 部署到服务器; the short
+# form is:
+#
 #   sudo cp deploy/webmux.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now webmux
 #
-# Adjust User= and WorkingDirectory= to match where you installed it, and make
-# sure that user owns the checkout — the data directory (default ~/.webmux) is
-# created 0700 and holds both the password hash and the token-signing secret.
+# Adjust User=, Group= and WorkingDirectory= to match where you installed it.
+# That user must own the checkout, and it must have a real home directory: the
+# data directory defaults to `~/.local/share/webmux` (Linux) and is created 0700
+# because it holds both the password hash and the token-signing secret.
 
 [Unit]
 Description=webmux — browser terminal with tmux-backed session persistence
 Documentation=https://github.com/SmartXiaoMing/webmux
 After=network-online.target
 Wants=network-online.target
+
+# A crash loop during a bad upgrade should not spin forever.
+#
+# These two live in [Unit], not [Service] — they moved there in systemd 230. In
+# [Service] they are ignored with "Unknown key name ... in section 'Service'",
+# which disables the limiter rather than failing loudly.
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -42,6 +54,10 @@ EnvironmentFile=-/etc/webmux.env
 Restart=always
 RestartSec=5
 
+# Safe here, and free: the server never needs to gain privileges. Note that no
+# stronger sandboxing is enabled, deliberately — see the note at the bottom.
+NoNewPrivileges=true
+
 # ---------------------------------------------------------------------------
 # The two settings below are load-bearing, and both are non-default.
 # ---------------------------------------------------------------------------
@@ -62,9 +78,13 @@ KillMode=process
 # and conclude that every session had vanished — while the tmux server and its
 # shells keep running, now unreachable and unkillable through webmux.
 #
-# For the same reason, do not enable ProtectSystem=strict with PrivateTmp-like
-# semantics: the server must be able to reach the tmux socket, the data
-# directory and the configured file roots.
+# For the same reason, this unit enables no sandboxing beyond NoNewPrivileges.
+# ProtectSystem=strict, ProtectHome=yes, ReadWritePaths and friends all look
+# attractive and all have to be re-derived per installation: the server legitimately
+# touches the tmux socket, its data directory, every configured file root (which
+# may be /var/log, a mounted volume, or a NAS) and anything those roots contain.
+# A sandbox that is wrong in a way that only shows up when someone opens a
+# directory is worse than no sandbox.
 
 [Install]
 WantedBy=multi-user.target

@@ -305,6 +305,7 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
           // The parent's *live* directory, not the one it was created in: "open
           // another shell here" means here, now.
           onNewSession={(parent) => void createSession(parent.liveCwd, parent.id)}
+          onOpenDirectory={openDirectory}
         />
 
         <RecentSection places={places} onOpenDirectory={openDirectory} />

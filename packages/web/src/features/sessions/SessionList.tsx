@@ -84,6 +84,8 @@ export interface SessionListProps {
   onRename: (id: string, title: string) => void
   /** Opens a shell rooted at this session's own directory. */
   onNewSession: (parent: SessionSummary) => void
+  /** Opens the file browser at this session's own directory. */
+  onOpenDirectory: (path: string) => void
 }
 
 /**
@@ -102,6 +104,7 @@ export function SessionList({
   onKill,
   onRename,
   onNewSession,
+  onOpenDirectory,
 }: SessionListProps): React.JSX.Element {
   const [open, setOpen] = useState(true)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -205,6 +208,22 @@ export function SessionList({
           onClick={() => onNewSession(session)}
         >
           <PlusIcon size={13} />
+        </button>
+
+        {/* The live directory again, as a destination: the file browser opens
+            wherever the shell actually is. A directory the shell has cd'd out
+            of the configured roots is not browsable — the file view says so
+            itself, which is a better answer than a button that silently
+            disappears. */}
+        <button
+          type="button"
+          className="shrink-0 rounded px-1 text-faint hover:text-accent"
+          data-session-open={session.id}
+          aria-label={`在文件页打开 ${session.liveCwd}`}
+          title="在文件页打开此目录"
+          onClick={() => onOpenDirectory(session.liveCwd)}
+        >
+          <FolderIcon size={13} />
         </button>
 
         <button

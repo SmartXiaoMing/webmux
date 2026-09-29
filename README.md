@@ -186,18 +186,101 @@ location / {
 如果反代必须在另一台机器上，就用防火墙把这个端口只放给反代的地址，
 启动时也会有警告提醒你。
 
-开机自启用 `deploy/webmux.service`：
+### 做成 systemd 服务
+
+仓库里带了一份可直接用的单元文件 `deploy/webmux.service`。完整流程：
+
+**1. 装依赖** —— Node 22+、tmux、pnpm：
+
+```bash
+# Debian / Ubuntu
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs tmux git
+sudo corepack enable pnpm
+```
+
+**2. 建一个专用用户**，且**必须有真实存在的家目录** —— 数据目录默认在
+`~/.local/share/webmux`，家目录不存在会直接启动失败：
+
+```bash
+sudo useradd --create-home --shell /bin/bash webmux
+```
+
+**3. 拉代码并以该用户身份跑一次**（装依赖、构建前端、设好密码）：
+
+```bash
+sudo -u webmux git clone https://github.com/SmartXiaoMing/webmux /opt/webmux
+cd /opt/webmux && sudo -u webmux ./start.sh
+```
+
+看到 `listening on http://…` 就说明没问题，`Ctrl-C` 停掉。
+
+**4. 安装并启动**：
 
 ```bash
 sudo cp deploy/webmux.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now webmux
+sudo systemctl daemon-reload
+sudo systemctl enable --now webmux
 ```
 
-单元文件里有两处**不是默认值**，而且都是必须的，改之前请先读那里的注释：
-`KillMode=process`（默认的 control-group 会在 `systemctl restart` 时把同 cgroup 里的
-tmux 一起杀掉，正好毁掉 webmux 存在的理由），以及**不要**加 `PrivateTmp=yes`
-（tmux 的 socket 在 `/tmp`，私有 `/tmp` 会让重启后的服务找不到它，于是所有会话
-看起来都消失了，而它们其实还在跑）。
+代码不在 `/opt/webmux`、或用户名不叫 `webmux` 时，改单元文件里的
+`User=` / `Group=` / `WorkingDirectory=` / `ExecStart=`。
+
+**5. 看它活着没有**：
+
+```bash
+systemctl status webmux
+journalctl -u webmux -f          # 实时日志
+```
+
+**6. 环境变量**（可选）写进 `/etc/webmux.env`，单元文件会读它：
+
+```bash
+WEBMUX_HOST=127.0.0.1
+WEBMUX_PORT=8866
+# 前面有 TLS 反代时打开，见上面的说明
+WEBMUX_TRUST_PROXY=true
+```
+
+（单元文件里 `EnvironmentFile=-/etc/webmux.env` 的那个 `-` 表示文件不存在也能启动。）
+
+**7. 升级**：
+
+```bash
+sudo -u webmux git -C /opt/webmux pull
+sudo systemctl restart webmux
+```
+
+`start.sh` 启动时会按需重装依赖、重建前端，所以 pull 完直接 restart 就够了。
+
+**重启服务不会丢会话** —— 这正是整套设计的重点。`systemctl restart webmux`
+之后，tmux 服务端与里面的进程原封不动，新的 webmux 进程启动时把它们接管回来。
+
+#### 单元文件里两个不能改的设置
+
+改之前请先读那里的注释：
+
+- **`KillMode=process`**（默认是 `control-group`）。tmux 服务端是被 webmux 启动的，
+  因而落在同一个 cgroup 里；用默认值的话，`systemctl restart webmux` 会把整个 cgroup
+  信号一遍 —— tmux 连同里面所有 shell 一起被杀掉，正好毁掉 webmux 存在的理由。
+- **不要加 `PrivateTmp=yes`**（任何 drop-in 里也别加）。tmux 的 socket 在 `/tmp`，
+  而私有 `/tmp` 每次调用都是新的命名空间：重启后的 webmux 会在新 `/tmp` 里找不到 socket，
+  于是认为所有会话都消失了 —— 而它们其实还在跑，只是从此既连不上也杀不掉。
+
+出于同样的理由，这个单元**没有启用更强的沙箱**（`ProtectSystem=strict`、
+`ProtectHome`、`ReadWritePaths` 之类）。它们看起来都很值得加，但每一个都得按你的安装
+重新推导一遍：服务要碰 tmux 的 socket、数据目录、以及**每一个配置的文件根**
+（可能是 `/var/log`、外挂卷、NFS）。一个只在打开某个目录时才暴露问题的沙箱，
+比没有沙箱更糟。
+
+#### 用 nvm / asdf / fnm 装 Node 的话
+
+systemd 给服务的 `PATH` 很短，不包含这些工具装的 Node。症状是 `start.sh` 报
+"找不到 node"，而你在自己 shell 里敲 `node -v` 一切正常。在单元文件里补一行：
+
+```ini
+Environment=PATH=/home/webmux/.nvm/versions/node/v22.23.1/bin:/usr/local/bin:/usr/bin:/bin
+```
 
 ---
 
@@ -369,9 +452,14 @@ key 里必须带分享 ID：只用 IP 的话，在默认的 `trustProxy: false` 
 - **会话从文件页创建**：在「文件」里进入想要的目录，点工具条上的终端图标，
   就在那个目录开一条 shell。侧栏没有「新建」按钮 —— 一条终端只有开在你想要的目录里才有用，
   而在侧栏建要么得替你猜一个目录、要么让你选两次。
-  目录只可能来自文件 API，也就是只可能是路径牢笼内的 —— 这点比看上去重要：服务端的会话
-  `cwd` **不做校验**（直接交给 tmux），给一个不存在的路径，tmux 会静默回落到 `$HOME`，
-  用户只会以为自己的选择没生效。
+  文件页给出的目录只可能来自文件 API，也就是只可能是路径牢笼内的。
+  但**会话树让情况变了**：从会话上点 `+` 时，新会话的目录是父会话*当前所在的*目录 ——
+  那是 shell `cd` 到过的任何地方，可能已经被删掉。所以服务端现在会校验这个路径是不是
+  一个真实存在的目录，不是就回落到 `$HOME` 并记一条告警。
+  这条校验是被一个 bug 逼出来的：曾经以为「给 tmux 一个不存在的 `-c`，它会静默回落到
+  `$HOME`」—— **它不会**。它起一个永远不打印提示符的 pane，于是终端一片空白，
+  而所有日志里什么都没有。测试里现在有一条专门钉住这个（断言的是 shell 能应答，
+  不是「渲染出了字节」—— 死掉的 pane 一样会渲染转义序列）。
 - **侧栏每个会话下面显示它此刻所在的目录**，而不是创建时选的那个。在会话里 `cd` 之后侧栏跟着变：
   有多个会话时，「哪个是 webmux 仓库」正是最需要一眼看出来的信息。这个值由服务端**另行定时刷新**，
   而不是在 `GET /api/sessions` 里现查 tmux —— 那个接口同时是客户端的存活探针，

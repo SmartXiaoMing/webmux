@@ -1113,6 +1113,12 @@ describe('localisation and control changes', () => {
         'nothing nests below a child — the tree is one level deep',
       )
 
+      // The folder icon is a navigation shortcut: the file browser opens at
+      // wherever the shell actually is.
+      await page.locator(`[data-session-open="${child.id}"]`).click()
+      await page.locator(`[data-crumb="${child.cwd}"]`).waitFor({ timeout: 15_000 })
+      await page.locator('header button:has-text("终端")').click()
+
       // Rename, since a session named after its directory is a starting point
       // rather than a decision.
       await page.locator(`[data-session-rename="${sibling.id}"]`).click()

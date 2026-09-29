@@ -307,6 +307,7 @@ export function FileBrowser({
               {index > 0 && <span className="px-0.5 text-faint">/</span>}
               <button
                 type="button"
+                data-crumb={crumb.path}
                 className={`max-w-32 truncate rounded px-1 py-0.5 font-mono text-[11px] ${
                   index === crumbs.length - 1 ? 'text-body' : 'text-muted hover:text-accent'
                 }`}
