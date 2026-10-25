@@ -237,7 +237,17 @@ export function TerminalView({
       const total = term.buffer.active.length
       const maxTop = Math.max(0, (total - term.rows) * cell)
 
-      const height = `${Math.round(total * cell)}px`
+      /*
+       * The spacer is sized so that the overlay's *scrollable range* is
+       * exactly `maxTop`, not so that its content height matches the buffer.
+       * `total * cell` looks equivalent, but only when the overlay happens to
+       * be `rows * cell` tall. It is taller whenever fit leaves a remainder,
+       * and much taller while the terminal is mid-layout (or its CSS has not
+       * applied) — and then the browser clamps `scrollTop` below `maxTop` and
+       * the scroll event maps that clamp back onto a line above the bottom,
+       * which walks the viewport away from the prompt on every write.
+       */
+      const height = `${Math.round(maxTop + scrollEl.clientHeight)}px`
       if (spacerEl.style.height !== height) spacerEl.style.height = height
 
       // Clamped on both sides: iOS rubber-banding produces negative and
@@ -258,11 +268,31 @@ export function TerminalView({
       if (line !== term.buffer.active.viewportY) term.scrollToLine(line)
     }
 
-    // No gesture maths needed: the browser already suppresses `click` for a
-    // gesture it treated as a scroll, so a tap is the only thing that produces
-    // one. Focusing synchronously inside that handler is what opens the iOS
-    // keyboard.
-    const onClick = (): void => term.focus()
+    /*
+     * Tapping the bottom line focuses the terminal; tapping the log does not.
+     *
+     * On a phone the soft keyboard covers half the screen, and tapping the log
+     * is how you stop a flick or start reading — not an invitation to type. The
+     * prompt line (the last row, where the cursor lives) is the input line, so
+     * that is the tap target. One cell is too small for a fingertip, hence the
+     * 32px floor; the row above is often the wrapped tail of the same prompt.
+     *
+     * `touchend`/`click` only fires for a tap, not for a scrolling gesture —
+     * the browser suppresses it — so there is no gesture maths here. Focusing
+     * synchronously in the handler is what opens the iOS keyboard; blurring on
+     * every other tap is what dismisses it.
+     */
+    const onClick = (event: MouseEvent): void => {
+      const screenEl = host.querySelector('.xterm-screen')
+      if (cell > 0 && screenEl instanceof HTMLElement) {
+        const { bottom } = screenEl.getBoundingClientRect()
+        if (event.clientY >= bottom - Math.max(cell, 32)) {
+          term.focus()
+          return
+        }
+      }
+      term.blur()
+    }
 
     // Seed from the device, then track the pointer that is actually in use. A
     // media query alone would break mouse selection on a touch-screen laptop.
@@ -391,8 +421,10 @@ export function TerminalView({
           conditional here would show up as "switching to files scrolled my
           terminal to the top".
 
-          The spacer is what gives it something to scroll; its height is
-          `buffer length × cell height` and is rewritten by the sync.
+          The spacer is what gives it something to scroll; the sync rewrites
+          its height so the scrollable range matches the terminal's scrollback
+          exactly. See the comment on `sync` for why that is not simply
+          `buffer length × cell height`.
         */}
         <div ref={scrollRef} className="term-scroll" aria-hidden="true">
           <div ref={spacerRef} />

@@ -154,6 +154,20 @@ async function waitForReady(timeoutMs = 40_000) {
 
 
 /**
+ * Focuses a phone's terminal the way a finger does.
+ *
+ * A mouse click on `.xterm` is not it: on a touch device the scroll overlay is
+ * above the terminal (that is how swiping works), so the click lands there and
+ * is refused by Playwright's actionability check. A tap on the prompt line is
+ * the actual input affordance, and it focuses synchronously.
+ */
+async function tapPrompt(target) {
+  const screen = await target.locator('.xterm-screen').boundingBox()
+  assert.ok(screen, 'the terminal screen should be laid out')
+  await target.touchscreen.tap(screen.x + screen.width / 2, screen.y + screen.height - 8)
+}
+
+/**
  * Creates a session through the directory picker.
  *
  * Session creation now asks where to start rather than silently using the
@@ -190,6 +204,12 @@ async function rowAction(row, label) {
  * second download just to run tests is not a good trade.
  */
 async function launchBrowser() {
+  // An explicit binary wins. The machine's Chrome can be older than the
+  // app's CSS (Tailwind v4 needs @layer, i.e. Chrome 99+), in which case the
+  // suite is testing the browser's layout engine rather than the app.
+  if (process.env.WEBMUX_TEST_CHROME) {
+    return await chromium.launch({ executablePath: process.env.WEBMUX_TEST_CHROME })
+  }
   try {
     return await chromium.launch()
   } catch (err) {
@@ -484,11 +504,11 @@ describe('webmux in a browser', () => {
     // reaching the tty; this key bypasses that entirely, so what is asserted
     // here is that the byte arrives and the shell acts on it.
     await mobile.waitForFunction(() => window.__webmuxStatus === 'ready', { timeout: 40_000 })
-    await mobile.click('.xterm')
+    await tapPrompt(mobile)
     await mobile.keyboard.type('echo XYc')
     await mobile.locator('button[title="退格（Backspace）"]').click()
     // The button took the focus, so the keyboard has to go back first.
-    await mobile.click('.xterm')
+    await tapPrompt(mobile)
     await mobile.keyboard.type('Z')
     await mobile.keyboard.press('Enter')
     // `XYcZ` would mean the erase never happened.
@@ -969,11 +989,18 @@ describe('webmux in a browser', () => {
         const spacer = scroll?.firstElementChild
         const screen = document.querySelector('.xterm-screen')
         const cell = screen.getBoundingClientRect().height / term.rows
+        const maxTop = Math.max(0, (term.buffer.active.length - term.rows) * cell)
         return {
           cell,
           spacerHeight: Number.parseFloat(spacer?.style.height ?? 'NaN'),
-          expected: Math.round(term.buffer.active.length * cell),
-          viewportHeight: Math.round(term.rows * cell),
+          // The scroll *range*, not the buffer's full height: the spacer is
+          // sized so that `scrollTop === maxTop` lands on the last line. Sizing
+          // it from `length * cell` instead assumes the overlay is exactly
+          // `rows * cell` tall, which is not true when fit leaves a remainder
+          // or the terminal is mid-layout — the browser then clamps scrollTop
+          // short of maxTop.
+          expected: Math.round(maxTop + scroll.clientHeight),
+          overlayHeight: Math.round(scroll.clientHeight),
         }
       })
 
@@ -981,7 +1008,7 @@ describe('webmux in a browser', () => {
       // The spacer is what gives the overlay something to scroll, and it must
       // track the buffer rather than the viewport.
       assert.equal(geometry.spacerHeight, geometry.expected)
-      assert.ok(geometry.expected >= geometry.viewportHeight)
+      assert.ok(geometry.expected >= geometry.overlayHeight)
     })
 
     it('is transparent to input on a device with a mouse', async () => {
@@ -992,14 +1019,19 @@ describe('webmux in a browser', () => {
     })
 
     /*
-     * The regression guard for tmux's alternate screen.
+     * The regression guard for phone scrolling, in three parts.
      *
      * tmux switches the terminal it is attached to into the alternate screen,
      * and that buffer has no scrollback — it is exactly one screen tall. The
      * overlay above still existed and still tracked `buffer.length`, but there
      * was never anything to scroll. Disabling the alternate screen in the tmux
-     * options is what makes this pass, so a pass here proves the terminal is
-     * on the normal buffer and that a real touch gesture moves it.
+     * options is the first half.
+     *
+     * The second half is hit-testing: xterm's WebGL renderer paints a
+     * full-size link canvas at z-index 2 inside the terminal host, and while
+     * that canvas is above the overlay a finger never reaches it. The third is
+     * the tap contract — reading the log must not summon the soft keyboard,
+     * while the prompt line at the bottom must.
      */
     it('swipes back through scrollback on a touch device', async () => {
       const mobileContext = await browser.newContext({
@@ -1021,20 +1053,40 @@ describe('webmux in a browser', () => {
         // this late in the suite. The loop is deliberately slow — a fast burst
         // is coalesced by tmux before it reaches the terminal, which makes the
         // resulting scrollback depth nondeterministic.
-        const command = 'for i in $(seq 1 80); do echo SCROLLBACK$i; sleep 0.01; done'
+        const command =
+          'for i in $(seq 1 80); do echo SCROLLBACK$i; sleep 0.01; done; echo SCROLLBACK_DONE'
+        // Earlier tests type into this shell. Ctrl-U discards whatever is on
+        // the input line, so a test that could not finish typing does not turn
+        // this command into a syntax error.
+        await tmux('send-keys', '-t', `webmux-${sessionId}`, 'C-u')
         await tmux('send-keys', '-t', `webmux-${sessionId}`, '-l', command)
         await tmux('send-keys', '-t', `webmux-${sessionId}`, 'Enter')
 
+        // Wait for the *end* of the output, not merely the first few lines.
+        // The swipe below would otherwise race output that is still arriving,
+        // and the viewport would move for a reason the assertion cannot see.
+        // The final marker is matched as a whole line: the echoed command also
+        // contains those words.
         await mobile.waitForFunction(
           () => {
             const term = window.__webmuxTerm
-            return (
-              term !== undefined &&
-              term.buffer.active.type === 'normal' &&
-              term.buffer.active.length > term.rows + 10
-            )
+            if (term === undefined || term.buffer.active.type !== 'normal') return false
+            const buffer = term.buffer.active
+            for (let i = 0; i < buffer.length; i += 1) {
+              if (buffer.getLine(i)?.translateToString(true).trim() === 'SCROLLBACK_DONE') {
+                return true
+              }
+            }
+            return false
           },
           { timeout: 30_000 },
+        )
+        await mobile.waitForFunction(
+          () => {
+            const buffer = window.__webmuxTerm.buffer.active
+            return buffer.baseY > 0 && buffer.viewportY === buffer.baseY
+          },
+          { timeout: 10_000 },
         )
 
         const before = await mobile.evaluate(() => ({
@@ -1044,6 +1096,24 @@ describe('webmux in a browser', () => {
 
         const box = await mobile.locator('.term-scroll').boundingBox()
         assert.ok(box, 'the touch-scroll overlay should be laid out')
+
+        // The overlay has to be the thing a finger lands on. xterm's WebGL
+        // renderer paints a full-size link canvas at z-index 2 inside the
+        // terminal host; while that canvas is on top, every swipe scrolls
+        // nothing and the terminal is a dead surface on a phone.
+        const hit = await mobile.evaluate(() => {
+          const scroll = document.querySelector('.term-scroll')
+          const rect = scroll.getBoundingClientRect()
+          const el = document.elementFromPoint(
+            rect.left + rect.width / 2,
+            rect.top + rect.height / 2,
+          )
+          return el !== null && scroll.contains(el)
+            ? 'overlay'
+            : `${el?.tagName}.${el?.className ?? ''}`
+        })
+        assert.equal(hit, 'overlay', 'touch hit-testing must reach the scroll overlay')
+
         const x = box.x + box.width / 2
         // Finger down: the content under it moves down, revealing older lines.
         const fromY = box.y + box.height * 0.25
@@ -1069,6 +1139,46 @@ describe('webmux in a browser', () => {
           (start) => window.__webmuxTerm.buffer.active.viewportY < start,
           before.viewportY,
           { timeout: 10_000 },
+        )
+
+        // Let any fling settle first: a tap whose job is to stop a moving
+        // scroll is consumed by the browser and produces no click at all,
+        // which would make the assertions below depend on momentum timing.
+        // Waiting for the scroll position to be still for a moment is both
+        // faster and less arbitrary than sleeping for a fixed period.
+        await mobile.waitForFunction(
+          () => {
+            const scroll = document.querySelector('.term-scroll')
+            const now = scroll.scrollTop
+            if (window.__scrollStableAt !== now) {
+              window.__scrollStableAt = now
+              window.__scrollStableSince = performance.now()
+              return false
+            }
+            return performance.now() - window.__scrollStableSince >= 300
+          },
+          { timeout: 5_000 },
+        )
+
+        // The tap side of the same surface. Reading the log is not typing:
+        // a tap above the prompt line dismisses the keyboard rather than
+        // summoning it, and the prompt line itself is the way back in.
+        await mobile.evaluate(() => window.__webmuxTerm.focus())
+        const screen = await mobile.locator('.xterm-screen').boundingBox()
+        assert.ok(screen, 'the terminal screen should be laid out')
+
+        await mobile.touchscreen.tap(screen.x + screen.width / 2, screen.y + screen.height * 0.4)
+        assert.equal(
+          await mobile.evaluate(() => document.activeElement?.className ?? ''),
+          '',
+          'tapping the log must not open the keyboard',
+        )
+
+        await mobile.touchscreen.tap(screen.x + screen.width / 2, screen.y + screen.height - 8)
+        assert.equal(
+          await mobile.evaluate(() => document.activeElement?.className ?? ''),
+          'xterm-helper-textarea',
+          'tapping the prompt line must focus the terminal',
         )
       } finally {
         await mobileContext.close()

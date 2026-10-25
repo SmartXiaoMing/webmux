@@ -271,7 +271,17 @@
 .term-scroll {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  /*
+   * Above xterm's own layers, which are inside the terminal host rather than
+   * in this stacking context: the WebGL renderer paints a full-size link
+   * canvas at z-index 2, and the scrollbar slider sits at 11. Below either of
+   * them this overlay is hit-tested last, so a finger swipe goes to the canvas
+   * and nothing scrolls — the terminal is a dead surface on every phone.
+   *
+   * 12 clears both while staying under the app's mobile drawer scrim (z-20),
+   * which has to keep receiving the tap that closes the sidebar.
+   */
+  z-index: 12;
   overflow-y: auto;
   overflow-x: hidden;
   /* Stop the gesture chaining out into the page's rubber-band. */
