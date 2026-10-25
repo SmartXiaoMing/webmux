@@ -151,6 +151,10 @@ export function TerminalView({
     // DOM cannot distinguish real output from a stale canvas. Harmless to
     // expose: anyone who can read this already has a shell.
     ;(window as unknown as { __webmuxTerm?: Terminal }).__webmuxTerm = term
+    // Which session that buffer belongs to. A test that needs to feed output
+    // to the terminal it is looking at has no other way to name it: the id
+    // travels inside the socket frames, never in the URL or the DOM.
+    ;(window as unknown as { __webmuxSessionId?: string }).__webmuxSessionId = sessionId
 
     try {
       const webgl = new WebglAddon()
@@ -316,6 +320,7 @@ export function TerminalView({
       fitRef.current = null
       measureAndSyncRef.current = null
       delete (window as unknown as { __webmuxTerm?: Terminal }).__webmuxTerm
+      delete (window as unknown as { __webmuxSessionId?: string }).__webmuxSessionId
     }
   }, [sessionId])
 

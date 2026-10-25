@@ -985,6 +985,90 @@ describe('webmux in a browser', () => {
       )
       assert.equal(pointerEvents, 'none')
     })
+
+    /*
+     * The regression guard for tmux's alternate screen.
+     *
+     * tmux switches the terminal it is attached to into the alternate screen,
+     * and that buffer has no scrollback — it is exactly one screen tall. The
+     * overlay above still existed and still tracked `buffer.length`, but there
+     * was never anything to scroll. Disabling the alternate screen in the tmux
+     * options is what makes this pass, so a pass here proves the terminal is
+     * on the normal buffer and that a real touch gesture moves it.
+     */
+    it('swipes back through scrollback on a touch device', async () => {
+      const mobileContext = await browser.newContext({
+        viewport: { width: 390, height: 844 },
+        isMobile: true,
+        hasTouch: true,
+        storageState: await context.storageState(),
+      })
+      try {
+        const mobile = await mobileContext.newPage()
+        await mobile.goto(BASE)
+        await mobile.waitForSelector('.xterm', { timeout: 15_000 })
+        await mobile.waitForFunction(() => window.__webmuxStatus === 'ready', { timeout: 40_000 })
+
+        const sessionId = await mobile.evaluate(() => window.__webmuxSessionId)
+        assert.ok(sessionId, 'the terminal should expose the session it is showing')
+
+        // Driven through tmux rather than typed: a keystroke is unreliable
+        // this late in the suite. The loop is deliberately slow — a fast burst
+        // is coalesced by tmux before it reaches the terminal, which makes the
+        // resulting scrollback depth nondeterministic.
+        const command = 'for i in $(seq 1 80); do echo SCROLLBACK$i; sleep 0.01; done'
+        await tmux('send-keys', '-t', `webmux-${sessionId}`, '-l', command)
+        await tmux('send-keys', '-t', `webmux-${sessionId}`, 'Enter')
+
+        await mobile.waitForFunction(
+          () => {
+            const term = window.__webmuxTerm
+            return (
+              term !== undefined &&
+              term.buffer.active.type === 'normal' &&
+              term.buffer.active.length > term.rows + 10
+            )
+          },
+          { timeout: 30_000 },
+        )
+
+        const before = await mobile.evaluate(() => ({
+          viewportY: window.__webmuxTerm.buffer.active.viewportY,
+        }))
+        assert.ok(before.viewportY > 0, 'the terminal should start at the bottom of its output')
+
+        const box = await mobile.locator('.term-scroll').boundingBox()
+        assert.ok(box, 'the touch-scroll overlay should be laid out')
+        const x = box.x + box.width / 2
+        // Finger down: the content under it moves down, revealing older lines.
+        const fromY = box.y + box.height * 0.25
+        const toY = box.y + box.height * 0.75
+
+        // Through CDP, like a real finger: synthetic DOM touch events do not
+        // run the compositor's scrolling path, so they would prove nothing.
+        const cdp = await mobileContext.newCDPSession(mobile)
+        await cdp.send('Input.dispatchTouchEvent', {
+          type: 'touchStart',
+          touchPoints: [{ x, y: fromY, id: 1 }],
+        })
+        for (let step = 1; step <= 12; step += 1) {
+          await cdp.send('Input.dispatchTouchEvent', {
+            type: 'touchMove',
+            touchPoints: [{ x, y: fromY + ((toY - fromY) * step) / 12, id: 1 }],
+          })
+          await delay(16)
+        }
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+
+        await mobile.waitForFunction(
+          (start) => window.__webmuxTerm.buffer.active.viewportY < start,
+          before.viewportY,
+          { timeout: 10_000 },
+        )
+      } finally {
+        await mobileContext.close()
+      }
+    })
   })
 
   describe('pwa assets', () => {

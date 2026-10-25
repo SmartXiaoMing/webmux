@@ -44,6 +44,30 @@ const SERVER_OPTIONS: Array<[string, string]> = [
   ['set-clipboard', 'on'],
   ['exit-unattached', 'off'], // keep sessions alive while no browser is connected
   ['default-terminal', 'tmux-256color'],
+  /*
+   * No alternate screen on the client terminal.
+   *
+   * tmux switches the terminal it is attached to into the alternate screen by
+   * default. That buffer has no scrollback by definition — it is exactly one
+   * screen tall — which silently killed two features: the browser's
+   * touch-scroll overlay had nothing to scroll (its spacer was never taller
+   * than the viewport), and the server mirror's "scrollback + screen" snapshot
+   * had no history in it, so a reload could only ever show the current screen.
+   *
+   * `smcup@`/`rmcup@` removes those two capabilities from what tmux believes
+   * the client terminal can do, so tmux stays on the normal screen and its
+   * output accumulates as scrollback — in xterm.js and in the headless mirror
+   * alike. This is the same decision `mouse off` above records from the other
+   * side: scrolling is the browser's job, and it needs a buffer to scroll.
+   *
+   * The cost is that a pane running a full-screen program paints its redraws
+   * into the normal buffer too, so exiting vim leaves its last screen in the
+   * scrollback. A fast burst can also have gaps: tmux coalesces redraws, so
+   * lines that scrolled off between two repaints never reach the client. Both
+   * are the usual trade for host-side scrollback, and worth it here: output
+   * you cannot scroll back to at all is the more common complaint.
+   */
+  ['terminal-overrides', ',*:Tc:smcup@:rmcup@'],
 ]
 
 export interface TmuxBackendOptions {
@@ -152,7 +176,6 @@ export class TmuxBackend implements SessionBackend {
       await this.setOptions(sessionOptions, '-g')
       await this.setOptions(SERVER_OPTIONS, '-s')
       await this.setServerOption('default-terminal', 'tmux-256color')
-      await this.setServerOption('terminal-overrides', ',*:Tc') // advertise truecolor
 
       /*
        * Read back what was just set.
