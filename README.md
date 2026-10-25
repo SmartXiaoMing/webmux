@@ -85,6 +85,56 @@ webmux 把它当成要正面解决的问题 —— 短暂断网**只补发缺失
 
 ![自定义快捷键](docs/quick-keys.png)
 
+### 通知：命令跑完，不用回来刷
+
+关掉网页让命令继续跑，本来是件好事 —— 直到你开始惦记它到底跑完没有。
+所以在命令结束的地方说一声就行：
+
+```bash
+make -j8 && webmux notify "构建成功" || webmux notify --level error "构建失败"
+```
+
+浏览器里立刻弹提示，未读数挂在标题上；点一下通知，直接跳回那条终端。
+手机锁屏、页面关掉也能收到 —— 但那一步需要 HTTPS，见「部署到服务器」。
+
+不装 CLI 也可以，直接 `curl`：纯文本正文就是通知内容，不用拼 JSON。
+
+```bash
+curl -sS -H 'Content-Type: text/plain' \
+     -H "X-Webmux-Token: $(cat ~/.local/share/webmux/notify-token)" \
+     -d '构建完成' http://127.0.0.1:8866/api/notify
+```
+
+想让长命令**自动**通知，在 `~/.bashrc` 末尾加上这段（可选，webmux 本身不做 shell 集成）：
+
+```bash
+# 失败的命令立刻通知；超过 10 秒的命令跑完通知。正文里带命令本身和耗时。
+_webmux_preexec() {
+  [ -n "$COMP_LINE" ] && return                                  # 正在补全
+  [ "$BASH_COMMAND" = "$PROMPT_COMMAND" ] && return              # 见下面的注释
+  [ "${BASH_COMMAND#_webmux_precmd}" != "$BASH_COMMAND" ] && return
+  _webmux_t0=$EPOCHSECONDS
+}
+_webmux_precmd() {
+  local code=$? took
+  [ -n "$_webmux_t0" ] || return
+  took=$(( EPOCHSECONDS - _webmux_t0 )); _webmux_t0=
+  { [ "$code" -ne 0 ] || [ "$took" -ge 10 ]; } || return
+  webmux notify --level "$([ "$code" -eq 0 ] && echo info || echo error)" \
+    --title "$([ "$code" -eq 0 ] && echo '命令完成' || echo "命令失败 $code")" \
+    --body "$(history 1 | sed 's/^ *[0-9]* *//') · ${took}s" &
+}
+trap '_webmux_preexec' DEBUG
+PROMPT_COMMAND="_webmux_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+```
+
+两个不显然的地方：时间必须在 `DEBUG` 陷阱里记（`PROMPT_COMMAND` 里记到的是"提示符出现的时间"，
+不是命令开始的时间），而 `DEBUG` 在 `PROMPT_COMMAND` 自己执行时也会触发，所以那两行 return 不能省。
+需要 bash 5 的 `EPOCHSECONDS`；zsh 用 `preexec`/`precmd` 写更直接。
+
+这个入口**只接受本机调用**：来源必须是回环地址、必须带令牌、且拒绝任何浏览器发来的请求。
+它不是一条从公网打进来的路。
+
 ### 还支持
 
 - **深浅主题**，默认跟随系统，终端配色跟着一起换
@@ -176,6 +226,13 @@ location / {
 ```
 
 更稳妥的做法是别直接暴露：用 WireGuard / Tailscale / Cloudflare Access 挡在前面。
+
+**手机推送要求 HTTPS，这不是 webmux 的选择。** Web Push 只在安全上下文里存在：
+用 `http://192.168.x.x:8866` 打开时，浏览器里根本没有 `pushManager` 这个东西，
+通知面板会直接显示"需要 HTTPS"。所以想要"页面关掉、手机锁屏也能收到"，
+前面得有一个带证书的入口（上面两种反代都行，Tailscale 的 `https://` 名字也可以）。
+iOS 还多一条：16.4 起才支持，而且必须先把页面**添加到主屏幕**。
+页面内通知不受这些限制 —— 只要页面开着，明文 HTTP 也能弹。
 
 **服务端自己不提供 TLS**，这是有意的：证书续期、密码套件、HTTP/2 这些交给成熟的反代
 比在这里重做一遍可靠得多。代价是监听非回环地址时启动会打警告 ——
@@ -367,6 +424,14 @@ Environment=PATH=/home/webmux/.nvm/versions/node/v22.23.1/bin:/usr/local/bin:/us
     "globalVerifyPerMinute": 60,
     "retentionDays": 30,
     "inlinePreview": true
+  },
+  "notify": {
+    "enabled": true,
+    "retentionDays": 30,
+    "maxStored": 500,
+    "perMinute": 30,
+    "allowFrom": [],
+    "push": { "enabled": true, "subject": "mailto:webmux@localhost" }
   }
 }
 ```
@@ -383,6 +448,9 @@ Environment=PATH=/home/webmux/.nvm/versions/node/v22.23.1/bin:/usr/local/bin:/us
 | `WEBMUX_SHARES_DEFAULT_TTL_HOURS` | 新建链接的默认有效期，默认 168（7 天） |
 | `WEBMUX_SHARES_MAX_ACTIVE` | 同时有效的链接上限，默认 100 |
 | `WEBMUX_SHARES_DEFAULT_RATE_LIMIT` | 默认限速（字节/秒），0 = 不限 |
+| `WEBMUX_NOTIFY_ENABLED` | 设为 `false` 关闭通知（`/api/notify` 一律 404） |
+| `WEBMUX_NOTIFY_PUSH_ENABLED` | 设为 `false` 只保留页面内通知，不发手机推送 |
+| `WEBMUX_NOTIFY_PER_MINUTE` | 通知入口的限流（条/分钟），默认 30 |
 
 ### 文件管理
 
@@ -407,7 +475,30 @@ Environment=PATH=/home/webmux/.nvm/versions/node/v22.23.1/bin:/usr/local/bin:/us
 作用于符号链接本身而非它的目标，和 `rm` / `mv` 一致。删除目录必须显式带上
 `recursive`，且任何已配置的根都删不掉。
 
+### 通知
+
+| 字段 | 说明 |
+|---|---|
+| `notify.enabled` | 关掉后 `/api/notify` 一律 404，前端也不再建事件通道 |
+| `notify.retentionDays` | 已读通知保留多久，默认 30。**未读的不受这一条约束** —— 出门一个月回来，"构建失败"不该已经消失 |
+| `notify.maxStored` | 最多存多少条，默认 500（已读、未读各自计数），防止一个写错的脚本把库撑大 |
+| `notify.perMinute` | 入口限流，默认 30。0 = 不限，不建议：这是唯一挡住死循环脚本的东西 |
+| `notify.allowFrom` | 额外放行的来源（CIDR，如 `172.17.0.0/16`），默认只认回环。见下 |
+| `notify.push.enabled` | 关掉后服务端不发 Web Push，页面内通知不受影响 |
+| `notify.push.subject` | VAPID 的 `sub` 声明，推送服务出问题时的联系人；不会真的发信 |
+
+**为什么要 `allowFrom`**：本机调用是从*源地址*判断的，有两种情况它不成立 —— 绑到某个具体
+的非回环地址（`WEBMUX_HOST=192.168.1.5`）时，同机脚本连过去源地址就是 `192.168.1.5`；
+容器里跑 webmux、脚本在宿主机上时，源地址是桥网关。这两种情况用 `allowFrom` 显式放行，
+放行之后仍然需要令牌。
+
+**反代之后要清楚一件事**：nginx 从 `127.0.0.1` 连过来时，"本机"这个判断就不再区分内外了
+（所以还会检查 `X-Forwarded-For` 的每一跳）。开了 `trustProxy` 时启动会打一条警告说明这点。
+真正兜底的是令牌 —— 它只存在本机文件里，网页读不到。
+
 ---
+
+## 安全
 
 ## 安全
 
@@ -440,7 +531,17 @@ Environment=PATH=/home/webmux/.nvm/versions/node/v22.23.1/bin:/usr/local/bin:/us
   少了这一步就是一个跨站 WebSocket 劫持漏洞，任何页面都能拿到你的 shell
 - **文件 API 走路径牢笼** —— 只能落在配置的根内，不跟随指向根外的符号链接
   （含悬空链接），数据目录永远不可达。牢笼有一份独立的单测套件，见[测试](#测试)
-- 下载一律 `Content-Disposition: attachment` + `X-Content-Type-Options: nosniff`
+- 下载一律 `Content-Disposition: attachment` + `X-Content-Type-Options: nosniff`；
+  **文件名同时是下载 URL 的末段**（`/api/fs/download/<name>?path=`）。有一类客户端
+  （安卓下载管理器、App 内置浏览器的下载桥）根本不读这个头，只按 URL 末段取名，
+  再按 `Content-Type` 补后缀 —— 只有 `?path=` 时你会得到一手机 `download.bin`。
+  分享页同理（`/s/<token>/raw/<name>`，目录是 `<name>.zip`）。服务端从不读取这一段，
+  发哪个文件仍然只由 `path` 决定
+- **通知入口只收本机请求**：来源地址必须是回环、`X-Forwarded-For` 的每一跳也得是回环、
+  必须带数据目录里那个 0600 的令牌，并且**拒绝任何带 `Origin` 头的请求**。
+  最后一条不是多余的：你浏览的任何网页都能向 `127.0.0.1:8866` 发 POST，
+  同源策略只拦读响应、不拦发请求。判定读的是 socket 对端地址而**不是 `req.ip`** ——
+  开了 `trustProxy` 时后者就是 `X-Forwarded-For` 里的内容，由调用方自己填
 
 ### 分享链接的额外说明
 
@@ -647,6 +748,7 @@ pnpm test          # 全部
 - [x] **P3** 分享下载链接（token / 过期 / 下载上限 / 限速 / 密码 / 撤销）
 - [x] **P4** 移动端打磨（触摸滚动、PWA、主题）+ 实时目录 + 自定义快捷键
 - [ ] **P5** 审计面板、2FA、Docker 镜像
+- [x] **P6** 通知（本机回调 API、`/ws/events` 实时推送、Web Push 手机推送）
 
 设计文档见 [DESIGN.md](./DESIGN.md)。
 

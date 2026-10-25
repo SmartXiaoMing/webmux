@@ -640,11 +640,15 @@ export function FileBrowser({
  * A plain `window.location.assign` would be a navigation for anything the
  * server sends inline — an image or a text file would replace the app. The
  * `download` attribute on a same-origin URL forces a save instead.
+ *
+ * The name is passed explicitly rather than left to the response headers: the
+ * URL carries the same one as its last segment, so a client that honours
+ * neither the header nor the attribute still has something to save as.
  */
-function triggerDownload(url: string): void {
+function triggerDownload(url: string, name: string): void {
   const anchor = document.createElement('a')
   anchor.href = url
-  anchor.download = ''
+  anchor.download = name
   document.body.append(anchor)
   anchor.click()
   anchor.remove()
@@ -780,8 +784,14 @@ function FileRow({
               label={`操作 ${entry.name}`}
               items={[
                 isDir
-                  ? { label: '打包下载', onSelect: () => triggerDownload(api.archiveUrl(entry.path)) }
-                  : { label: '下载', onSelect: () => triggerDownload(api.downloadUrl(entry.path)) },
+                  ? {
+                      label: '打包下载',
+                      onSelect: () => triggerDownload(api.archiveUrl(entry.path), `${entry.name}.zip`),
+                    }
+                  : {
+                      label: '下载',
+                      onSelect: () => triggerDownload(api.downloadUrl(entry.path), entry.name),
+                    },
                 ...(isZip
                   ? [{ label: unpacking ? '解压中…' : '解压', onSelect: onUnpack, disabled: unpacking }]
                   : []),

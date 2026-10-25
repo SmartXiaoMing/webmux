@@ -190,7 +190,22 @@ export function registerFileRoutes(app: FastifyInstance, ctx: FileRoutesContext)
     }
   })
 
-  app.get('/api/fs/download', { preHandler: auth }, async (req, reply) => {
+  /**
+   * `/api/fs/download/<name>` and `/api/fs/archive/<name>` accept the entry's
+   * name as a trailing path segment, and the server never reads it.
+   *
+   * The segment exists for clients that discard `Content-Disposition` and name
+   * the saved file after the URL's last path segment — Android's download
+   * manager, an in-app browser's download bridge, some download tools. With
+   * only `?path=` in the URL that segment is the literal word `download`,
+   * which is how a phone ends up saving every file as `download.bin`.
+   *
+   * What is served is still decided by `path` alone, through the jail. That is
+   * the point of ignoring the name: a URL must not be able to deliver
+   * something other than what its last segment says. The bare routes stay
+   * registered so existing links and bookmarks keep working.
+   */
+  const download = async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = fsDownloadQuery.safeParse(req.query ?? {})
     if (!parsed.success) return sendInvalid(reply, firstIssue(parsed.error))
 
@@ -200,7 +215,10 @@ export function registerFileRoutes(app: FastifyInstance, ctx: FileRoutesContext)
       contentType: mimeFor(name),
       disposition: 'attachment',
     }))
-  })
+  }
+
+  app.get('/api/fs/download', { preHandler: auth }, download)
+  app.get('/api/fs/download/:name', { preHandler: auth }, download)
 
   /**
    * The same bytes as `download`, but `inline` — and only for a strict
@@ -446,7 +464,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: FileRoutesContext)
   // Archive
   // -------------------------------------------------------------------------
 
-  app.get('/api/fs/archive', { preHandler: auth }, async (req, reply) => {
+  const archive = async (req: FastifyRequest, reply: FastifyReply) => {
     const parsed = fsArchiveQuery.safeParse(req.query ?? {})
     if (!parsed.success) return sendInvalid(reply, firstIssue(parsed.error))
 
@@ -469,7 +487,12 @@ export function registerFileRoutes(app: FastifyInstance, ctx: FileRoutesContext)
     // Readable.from pulls from the generator only as fast as the socket
     // accepts, so backpressure is end-to-end with no manual drain handling.
     return reply.send(Readable.from(archiveStream(walk)))
-  })
+  }
+
+  // The `<name>` segment is the hint described above `download`; for a
+  // directory it is `<name>.zip`, matching what the response is called.
+  app.get('/api/fs/archive', { preHandler: auth }, archive)
+  app.get('/api/fs/archive/:name', { preHandler: auth }, archive)
 
   app.post('/api/fs/extract', { preHandler: auth }, async (req, reply) => {
     const parsed = fsExtractRequest.safeParse(req.body ?? {})

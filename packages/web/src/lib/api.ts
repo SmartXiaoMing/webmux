@@ -6,7 +6,13 @@ import type {
   FsSort,
   FsStat,
   FsUploadStatus,
+  NotificationListResponse,
+  NotificationStatusResponse,
+  NotifyReadRequest,
+  NotifyReadResponse,
   PlacesResponse,
+  PushSubscribeRequest,
+  PushSubscribeResponse,
   QuickKeyRequest,
   QuickKeysResponse,
   SessionSummary,
@@ -61,6 +67,35 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
 
   return body as T
+}
+
+/**
+ * The name a download saves as, taken from the path it points at.
+ *
+ * A trailing slash is stripped first: `/a/b/` names `b`. A path with no
+ * basename at all — a root — yields the empty string, and the caller then
+ * omits the segment rather than emitting a trailing slash, which the server's
+ * router would treat as a different (unregistered) path.
+ */
+function fileNameOf(path: string, suffix = ''): string {
+  const trimmed = path.replace(/\/+$/, '')
+  const base = trimmed.slice(trimmed.lastIndexOf('/') + 1)
+  return base === '' ? '' : `${base}${suffix}`
+}
+
+/**
+ * A download URL whose last path segment is the filename.
+ *
+ * The server ignores that segment — what is served is still decided by `path`
+ * alone — but not every client reads `Content-Disposition`. Android's download
+ * manager, in-app browsers and some download tools name the saved file after
+ * the URL instead, and without the segment they would all save it as
+ * `download.bin` (for archives, the same without the `download` part).
+ */
+function downloadHref(route: string, path: string, suffix = ''): string {
+  const name = fileNameOf(path, suffix)
+  const hint = name === '' ? '' : `/${encodeURIComponent(name)}`
+  return `${route}${hint}?path=${encodeURIComponent(path)}`
 }
 
 export const api = {
@@ -185,7 +220,7 @@ export const api = {
    * entire file in memory — ruinous for exactly the large files this exists
    * for — and would lose resumability.
    */
-  downloadUrl: (path: string) => `/api/fs/download?path=${encodeURIComponent(path)}`,
+  downloadUrl: (path: string) => downloadHref('/api/fs/download', path),
 
   /** Renders inline when the server's allowlist permits it, downloads when it does not. */
   previewUrl: (path: string) => `/api/fs/preview?path=${encodeURIComponent(path)}`,
@@ -197,7 +232,7 @@ export const api = {
    * starts, so this can take a moment on a large tree, and letting the browser
    * own the download means its own progress and retry behaviour apply.
    */
-  archiveUrl: (path: string) => `/api/fs/archive?path=${encodeURIComponent(path)}`,
+  archiveUrl: (path: string) => downloadHref('/api/fs/archive', path, '.zip'),
 
   // -------------------------------------------------------------------------
   // Places
@@ -238,6 +273,46 @@ export const api = {
 
   deleteQuickKey: (id: string) =>
     request<QuickKeysResponse>(`/api/quickkeys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // -------------------------------------------------------------------------
+  // Notifications
+  // -------------------------------------------------------------------------
+
+  listNotifications: (opts: { limit?: number; since?: number; unreadOnly?: boolean } = {}) => {
+    const query = new URLSearchParams()
+    if (opts.limit !== undefined) query.set('limit', String(opts.limit))
+    if (opts.since !== undefined) query.set('since', String(opts.since))
+    if (opts.unreadOnly === true) query.set('unreadOnly', 'true')
+
+    const suffix = query.size > 0 ? `?${query}` : ''
+    return request<NotificationListResponse>(`/api/notifications${suffix}`)
+  },
+
+  /**
+   * Marks notifications read. `ids` for one, `upTo` for everything up to a
+   * cursor, `all` for the lot — an explicit value rather than a toggle, so a
+   * retried request cannot flip the state back.
+   */
+  markNotificationsRead: (input: NotifyReadRequest) =>
+    request<NotifyReadResponse>('/api/notifications/read', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  /** Whether notifications exist at all here, and whether push can reach a phone. */
+  notificationStatus: () => request<NotificationStatusResponse>('/api/notifications/status'),
+
+  subscribePush: (input: PushSubscribeRequest) =>
+    request<PushSubscribeResponse>('/api/notifications/push', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  unsubscribePush: (endpoint: string) =>
+    request<PushSubscribeResponse>('/api/notifications/push', {
+      method: 'DELETE',
+      body: JSON.stringify({ endpoint }),
+    }),
 
   // -------------------------------------------------------------------------
   // Shares

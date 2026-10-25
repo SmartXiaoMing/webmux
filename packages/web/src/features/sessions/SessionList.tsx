@@ -2,14 +2,7 @@ import { useState } from 'react'
 import type { SessionSummary } from '@webmux/shared'
 import { SectionHeader } from '../../components/SectionHeader'
 import { FolderIcon, PencilIcon, PlusIcon, TerminalIcon } from '../../components/icons'
-
-function relativeTime(ms: number): string {
-  const seconds = Math.round((Date.now() - ms) / 1000)
-  if (seconds < 60) return '刚刚'
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`
-  if (seconds < 86_400) return `${Math.floor(seconds / 3600)} 小时前`
-  return `${Math.floor(seconds / 86_400)} 天前`
-}
+import { relativeTime } from '../../lib/time'
 
 /** Longest tail kept by `shortPath`, in characters. */
 const PATH_BUDGET = 28

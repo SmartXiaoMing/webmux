@@ -137,4 +137,59 @@ export const migrations: Array<(db: DB) => void> = [
       CREATE INDEX quick_keys_created_idx ON quick_keys (created_at);
     `)
   },
+
+  // 5 — notifications and push subscriptions
+  (db) => {
+    db.exec(`
+      -- Notifications raised by local callers (POST /api/notify) and delivered
+      -- to browsers over /ws/events and to phones over Web Push.
+      CREATE TABLE notifications (
+        -- AUTOINCREMENT is load-bearing, not habit. This id is the cursor a
+        -- reconnecting client sends back to be brought up to date, so a pruned
+        -- row's id must never be handed to a new row: a plain INTEGER PRIMARY
+        -- KEY reuses the largest id after the largest row is deleted, which
+        -- would make a client silently skip everything until it caught up.
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at INTEGER NOT NULL,
+        title      TEXT NOT NULL,
+        body       TEXT,
+        level      TEXT NOT NULL DEFAULT 'info' CHECK (level IN ('info', 'warn', 'error')),
+        -- The terminal that raised it, when the caller knew. Enables
+        -- click-to-jump; a deleted session just renders as a plain row.
+        session_id TEXT,
+        -- Who sent it: hostname, script name, whatever the caller said. For
+        -- display only, and never trusted for anything.
+        source     TEXT,
+        read_at    INTEGER
+      );
+
+      CREATE INDEX notifications_created_idx ON notifications (created_at DESC);
+
+      -- Partial, because the only query this serves is counting and fetching
+      -- *unread* rows, and those are a small fraction of the table.
+      CREATE INDEX notifications_unread_idx ON notifications (id) WHERE read_at IS NULL;
+
+      -- One row per browser/device that has agreed to receive push messages.
+      CREATE TABLE push_subscriptions (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        endpoint     TEXT NOT NULL UNIQUE,
+        p256dh       TEXT NOT NULL,
+        auth         TEXT NOT NULL,
+        ua           TEXT,
+        -- The VAPID public key this subscription was created against. Push
+        -- subscriptions are bound to the sender key: rotate the key and every
+        -- existing row is undeliverable, so the row records which key it
+        -- belongs to and the two are compared before each delivery.
+        vapid_public TEXT NOT NULL,
+        created_at   INTEGER NOT NULL,
+        last_ok_at   INTEGER,
+        failures     INTEGER NOT NULL DEFAULT 0,
+        -- Set once the push service keeps refusing; the row is kept so the
+        -- count shown in the UI does not silently drop to zero.
+        disabled_at  INTEGER
+      );
+
+      CREATE INDEX push_subscriptions_live_idx ON push_subscriptions (disabled_at);
+    `)
+  },
 ]

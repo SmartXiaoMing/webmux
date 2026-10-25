@@ -291,108 +291,126 @@ export function registerPublicShareRoutes(app: FastifyInstance, ctx: PublicShare
         return reply.code(303).headers(backTo).send()
       })
 
-      scope.get<{ Params: { token: string } }>(
-        '/:token/raw',
-        // Fastify exposes a HEAD route for every GET by default. A HEAD would
-        // run this handler, claim a download and open a descriptor for nothing —
-        // the kind of thing that shows up as "the cap decrements by itself".
-        { exposeHeadRoute: false },
-        async (req, reply) => {
-          const token = req.params.token
-          const found = lookup(ctx, token)
-          if (found.outcome === 'missing') {
-            return sendPage(reply, 404, renderNotFoundPage(), { 'x-webmux-error': 'not_found' })
-          }
-          if (found.outcome === 'refused') return refuse(reply, found.code)
+      /**
+       * The `<name>` suffix on `/raw/:name` is a hint for the client, and the
+       * server never reads it.
+       *
+       * Some clients — Android's download manager, an in-app browser's
+       * download bridge, some download tools — discard `Content-Disposition`
+       * and name the saved file after the URL's last path segment. `/raw` ends
+       * in a word that names nothing, so such a client turns every share into
+       * `raw.bin`. The suffix fixes the name without touching what is served:
+       * the token still picks the row, and every check below still runs.
+       */
+      const raw = async (
+        req: FastifyRequest<{ Params: { token: string } }>,
+        reply: FastifyReply,
+      ) => {
+        const token = req.params.token
+        const found = lookup(ctx, token)
+        if (found.outcome === 'missing') {
+          return sendPage(reply, 404, renderNotFoundPage(), { 'x-webmux-error': 'not_found' })
+        }
+        if (found.outcome === 'refused') return refuse(reply, found.code)
 
-          const row = found.row
-          const target = await resolveShareTarget(ctx.jail, row)
-          if (!target.ok) return refuse(reply, 'source_unavailable')
+        const row = found.row
+        const target = await resolveShareTarget(ctx.jail, row)
+        if (!target.ok) return refuse(reply, 'source_unavailable')
 
-          // Password *before* the download cap. The cap is a consumed resource:
-          // checking it first would let anyone holding the URL burn every
-          // download without knowing the password and permanently deny the
-          // legitimate recipient. Authenticate, then consume.
-          if (!(await unlocked(ctx, row, req))) {
-            return sendPage(
-              reply,
-              401,
-              renderUnavailablePage('这个分享需要密码，请先打开分享页面。'),
-              { 'x-webmux-error': 'password_required' },
-            )
-          }
-
-          // Counting is at request start with no refunds. A refund on a failed
-          // transfer needs a compensating decrement, which reintroduces the race
-          // and hands an attacker a "download for free" button — abort the
-          // connection repeatedly and the counter never moves.
-          //
-          // A Range that does not begin at byte 0 is exempt, so video seeking
-          // and resume-after-disconnect do not consume the cap. Be honest about
-          // what that means: a client that starts every range at byte 1 counts
-          // once and still gets 99.99% of the file. The cap is a leak-limiting
-          // courtesy, not an enforcement boundary.
-          const range = req.headers.range
-          const startsAtZero = range === undefined || /^bytes=0-/.test(range.trim())
-          if (startsAtZero) {
-            const claimed = ctx.shares.claimDownload(row.id)
-            if (claimed === null) return refuse(reply, 'exhausted')
-          }
-
-          // Audited here rather than after the transfer: the cap is consumed at
-          // this moment with no refunds, so this is when a download happened,
-          // whether or not the bytes then made it to the far end.
-          audit(ctx.auth.db, 'share.download', row.id, req.ip)
-          ctx.shares.touch(row.id, req.ip)
-
-          if (row.kind === 'dir') {
-            await sendArchive(ctx, req, reply, row, target.resolved)
-            return
-          }
-
-          const rate = row.rate_limit_bps ?? ctx.config.shares.defaultRateLimitBytesPerSec
-
-          // A payload served under a bearer URL must not sit in a proxy cache.
-          // If caching is ever wanted, note that the same URL returns a form or
-          // a file depending on the cookie, so it would need `Vary: Cookie`.
-          reply.header('cache-control', 'no-store')
-
-          await sendFile(
-            req,
+        // Password *before* the download cap. The cap is a consumed resource:
+        // checking it first would let anyone holding the URL burn every
+        // download without knowing the password and permanently deny the
+        // legitimate recipient. Authenticate, then consume.
+        if (!(await unlocked(ctx, row, req))) {
+          return sendPage(
             reply,
-            target.resolved.abs,
-            (name, size) => {
-              // The same allowlist the internal preview route uses. A second
-              // copy would be a copy that drifts, and this one decides whether
-              // markup executes in the SPA's origin.
-              const policy = ctx.config.shares.inlinePreview ? previewPolicy(name) : null
-              if (policy === null) {
-                return { contentType: mimeFor(name), disposition: 'attachment' }
-              }
-              const truncated = policy.byteLimit !== undefined && size > policy.byteLimit
-              return {
-                contentType: policy.contentType,
-                disposition: 'inline',
-                ...(policy.byteLimit !== undefined ? { byteLimit: policy.byteLimit } : {}),
-                headers: {
-                  'content-security-policy': "script-src 'none'; object-src 'none'",
-                  ...(truncated ? { 'x-webmux-truncated': 'true' } : {}),
-                },
-              }
-            },
-            {
-              bytesPerSecond: rate,
-              // A file that vanished between the resolve and the open is the
-              // share's payload being gone, not a bad request.
-              onError: (target, error) => {
-                log.warn(`share ${row.id}: ${error.code} ${error.message}`)
-                return sendPage(target, 410, renderUnavailablePage(MESSAGES.sourceUnavailable), {
-                  'x-webmux-error': 'source_unavailable',
-                })
-              },
-            },
+            401,
+            renderUnavailablePage('这个分享需要密码，请先打开分享页面。'),
+            { 'x-webmux-error': 'password_required' },
           )
-        },
+        }
+
+        // Counting is at request start with no refunds. A refund on a failed
+        // transfer needs a compensating decrement, which reintroduces the race
+        // and hands an attacker a "download for free" button — abort the
+        // connection repeatedly and the counter never moves.
+        //
+        // A Range that does not begin at byte 0 is exempt, so video seeking
+        // and resume-after-disconnect do not consume the cap. Be honest about
+        // what that means: a client that starts every range at byte 1 counts
+        // once and still gets 99.99% of the file. The cap is a leak-limiting
+        // courtesy, not an enforcement boundary.
+        const range = req.headers.range
+        const startsAtZero = range === undefined || /^bytes=0-/.test(range.trim())
+        if (startsAtZero) {
+          const claimed = ctx.shares.claimDownload(row.id)
+          if (claimed === null) return refuse(reply, 'exhausted')
+        }
+
+        // Audited here rather than after the transfer: the cap is consumed at
+        // this moment with no refunds, so this is when a download happened,
+        // whether or not the bytes then made it to the far end.
+        audit(ctx.auth.db, 'share.download', row.id, req.ip)
+        ctx.shares.touch(row.id, req.ip)
+
+        if (row.kind === 'dir') {
+          await sendArchive(ctx, req, reply, row, target.resolved)
+          return
+        }
+
+        const rate = row.rate_limit_bps ?? ctx.config.shares.defaultRateLimitBytesPerSec
+
+        // A payload served under a bearer URL must not sit in a proxy cache.
+        // If caching is ever wanted, note that the same URL returns a form or
+        // a file depending on the cookie, so it would need `Vary: Cookie`.
+        reply.header('cache-control', 'no-store')
+
+        await sendFile(
+          req,
+          reply,
+          target.resolved.abs,
+          (name, size) => {
+            // The same allowlist the internal preview route uses. A second
+            // copy would be a copy that drifts, and this one decides whether
+            // markup executes in the SPA's origin.
+            const policy = ctx.config.shares.inlinePreview ? previewPolicy(name) : null
+            if (policy === null) {
+              return { contentType: mimeFor(name), disposition: 'attachment' }
+            }
+            const truncated = policy.byteLimit !== undefined && size > policy.byteLimit
+            return {
+              contentType: policy.contentType,
+              disposition: 'inline',
+              ...(policy.byteLimit !== undefined ? { byteLimit: policy.byteLimit } : {}),
+              headers: {
+                'content-security-policy': "script-src 'none'; object-src 'none'",
+                ...(truncated ? { 'x-webmux-truncated': 'true' } : {}),
+              },
+            }
+          },
+          {
+            bytesPerSecond: rate,
+            // A file that vanished between the resolve and the open is the
+            // share's payload being gone, not a bad request.
+            onError: (target, error) => {
+              log.warn(`share ${row.id}: ${error.code} ${error.message}`)
+              return sendPage(target, 410, renderUnavailablePage(MESSAGES.sourceUnavailable), {
+                'x-webmux-error': 'source_unavailable',
+              })
+            },
+          },
+        )
+      }
+
+      // Fastify exposes a HEAD route for every GET by default. A HEAD would
+      // run this handler, claim a download and open a descriptor for nothing —
+      // the kind of thing that shows up as "the cap decrements by itself".
+      // Both shapes need the option: the hinted one would leak the same way.
+      scope.get<{ Params: { token: string } }>('/:token/raw', { exposeHeadRoute: false }, raw)
+      scope.get<{ Params: { token: string } }>(
+        '/:token/raw/:name',
+        { exposeHeadRoute: false },
+        raw,
       )
     },
     { prefix: '/s' },

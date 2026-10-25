@@ -4,7 +4,14 @@ import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } fr
 import cookie from '@fastify/cookie'
 import fastifyStatic from '@fastify/static'
 import websocket from '@fastify/websocket'
-import { forwardedHeaderWarning, loadConfig, plaintextWarning, unclaimedWarning } from './config'
+import {
+  buildNotifyAllowList,
+  forwardedHeaderWarning,
+  loadConfig,
+  notifyProxyWarning,
+  plaintextWarning,
+  unclaimedWarning,
+} from './config'
 import { openDatabase } from './db/index'
 import { logger } from './logger'
 import { getOrCreateSecret } from './auth/tokens'
@@ -20,9 +27,16 @@ import { QuickKeyStore } from './quickkeys/store'
 import { ShareStore } from './shares/store'
 import { VerifyGate } from './shares/verify'
 import { registerSessionRoutes } from './http/sessions'
+import { registerNotifyRoutes } from './http/notify'
 import { createJail, loadRoots } from './fs/jail'
 import { UploadStore } from './fs/upload'
 import { registerTerminalGateway } from './ws/gateway'
+import { registerEventGateway } from './ws/events'
+import { NotificationHub, type PushService } from './notify/hub'
+import { NotificationStore, PushSubscriptionStore } from './notify/store'
+import { getOrCreateNotifyToken, writeNotifyTokenFile } from './notify/token'
+import { WebPushService, getOrCreateVapidKeys } from './notify/webpush'
+import { writeRuntimeFile } from './runtime'
 import { SessionRegistry } from './terminal/registry'
 import { TmuxBackend } from './terminal/tmux'
 
@@ -81,6 +95,28 @@ async function main(): Promise<void> {
     config.shares.unlockWindowMinutes * 60_000,
   )
 
+  // Notifications. The token is generated before anything can call the route,
+  // and the allow list is built once: it is consulted on every ingest request,
+  // and parsing CIDRs per request would put a config error on the hot path
+  // instead of at boot, where it belongs.
+  const notifications = new NotificationStore(db)
+  const pushSubscriptions = new PushSubscriptionStore(db)
+  const notifyToken = getOrCreateNotifyToken(db)
+  const notifyAllow = buildNotifyAllowList(config.notify.allowFrom)
+  // The relay is what makes a phone ring with the page closed, so it is only
+  // left out when the operator has turned it off — and then the routes that
+  // manage subscriptions report it as unavailable rather than 404-ing
+  // somewhere the UI cannot explain.
+  const push: PushService | null =
+    config.notify.enabled && config.notify.push.enabled
+      ? new WebPushService({
+          store: pushSubscriptions,
+          keys: getOrCreateVapidKeys(db),
+          subject: config.notify.push.subject,
+        })
+      : null
+  const hub = new NotificationHub(notifications, config.notify, push)
+
   const app = Fastify({
     logger: false,
     // Only honoured when explicitly enabled, so a misconfigured proxy cannot
@@ -130,6 +166,16 @@ async function main(): Promise<void> {
   registerShareRoutes(app, { jail, shares, auth, config })
   registerPlaceRoutes(app, { jail, places, auth })
   registerQuickKeyRoutes(app, { quickKeys, auth })
+  registerNotifyRoutes(app, {
+    hub,
+    store: notifications,
+    subscriptions: pushSubscriptions,
+    auth,
+    notify: config.notify,
+    allow: notifyAllow,
+    token: notifyToken,
+    push,
+  })
   // Registered before the static handler and the SPA fallback, but more
   // importantly it is a parametric route: `find-my-way` prefers parametric over
   // `@fastify/static`'s `/*`, so `/s/...` reaches this rather than index.html
@@ -138,6 +184,10 @@ async function main(): Promise<void> {
 
   await app.register(websocket)
   registerTerminalGateway(app, { registry, auth, config })
+  // After the plugin, like the terminal gateway: @fastify/websocket installs
+  // its upgrade hook when it is registered, and a route declared with
+  // `websocket: true` before that is never upgraded.
+  registerEventGateway(app, { hub, store: notifications, auth, config })
 
   // In production the built SPA is served from here; in development Vite serves
   // it and proxies /api and /ws to this process.
@@ -175,6 +225,10 @@ async function main(): Promise<void> {
   // session that has been cd'd around since webmux last ran.
   registry.startLiveCwdRefresh()
 
+  // Sweeps once immediately, then hourly. Notifications outlive the process by
+  // design, so the first sweep of a new run is often the one that matters.
+  hub.startMaintenance()
+
   // The only sweep that finds staging areas stranded by a crash, a SIGKILL or
   // a container restart. Expiry is by idle time rather than "clear everything",
   // so restarting mid-upload does not discard the progress that makes a
@@ -182,10 +236,19 @@ async function main(): Promise<void> {
   const reclaimed = await uploads.sweep()
   if (reclaimed > 0) log.info(`reclaimed ${reclaimed} abandoned upload(s)`)
 
+  // Written before the port opens, so a script racing the boot finds its token
+  // rather than a 401 it cannot explain.
+  const tokenFile = writeNotifyTokenFile(config.dataDir, notifyToken)
+
   await app.listen({ host: config.host, port: config.port })
+
+  // After listening, because the file is an instruction to dial this address
+  // and announcing it before the socket exists would be a lie.
+  const runtime = writeRuntimeFile(config, tokenFile)
 
   const url = `http://${config.host === '0.0.0.0' ? 'localhost' : config.host}:${config.port}`
   log.info(`listening on ${url}`)
+  log.info(`notifications: POST ${runtime.url}/api/notify (local callers, see ${tokenFile})`)
 
   // Warned rather than refused: a LAN or a VPN is a legitimate place to run
   // this, and the server cannot tell a trusted network from an open one. What
@@ -194,6 +257,7 @@ async function main(): Promise<void> {
   for (const warning of [
     plaintextWarning(config.host),
     forwardedHeaderWarning(config.host, config.trustProxy),
+    notifyProxyWarning(config.host, config.trustProxy),
   ]) {
     if (warning !== null) log.warn(warning)
   }
@@ -220,6 +284,11 @@ async function main(): Promise<void> {
     } catch (err) {
       log.warn(`error closing server: ${(err as Error).message}`)
     }
+    // Between the listener closing and the database closing: deliveries in
+    // flight are the only thing left that touches the database, and a push
+    // that resolves after `db.close()` would throw from a callback with
+    // nowhere to go.
+    await hub.shutdown()
     await registry.shutdown()
     db.close()
     log.info('goodbye — sessions remain running in tmux')

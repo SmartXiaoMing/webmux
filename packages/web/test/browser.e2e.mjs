@@ -558,6 +558,10 @@ describe('webmux in a browser', () => {
       rowAction(rows.filter({ hasText: 'hello.txt' }), '下载'),
     ])
     assert.equal(readFileSync(await download.path(), 'utf8'), 'hello from the browser test')
+    // The save dialog's name comes from the response headers and the row's own
+    // name; the URL's last segment carries the same one for clients that read
+    // neither. A `.bin` here is the bug this pins down.
+    assert.equal(download.suggestedFilename(), 'hello.txt')
 
     // Delete, through the two-step confirmation.
     const target = rows.filter({ hasText: 'upload-me.txt' })
@@ -710,6 +714,7 @@ describe('webmux in a browser', () => {
       rowAction(rows.filter({ hasText: 'sub' }).first(), '打包下载'),
     ])
     const saved = path.join(tmpRoot, 'packed.zip')
+    assert.equal(download.suggestedFilename(), 'sub.zip')
     await download.saveAs(saved)
     // PK\x03\x04 — an archive, not an error page.
     assert.equal(readFileSync(saved).subarray(0, 4).toString('binary'), 'PK\x03\x04')
@@ -1433,4 +1438,143 @@ describe('localisation and control changes', () => {
    * feature IS covered, by the reload test above.
    */
 
+})
+
+/*
+ * Notifications.
+ *
+ * Everything here is published through the local ingress with the token the
+ * server wrote, rather than typed into a shell: a keystroke does not reliably
+ * reach the shell this late in the suite, and this is closer to what the
+ * feature is for anyway — the caller is a script, not a person.
+ *
+ * The assertions are on state rather than on styling. This suite runs against
+ * whatever Chrome the machine has, and an old one renders nothing at all
+ * (Tailwind v4's output lives inside `@layer`, which predates Chrome 99), so
+ * anything that depends on CSS being applied would be a test of the browser
+ * rather than of the app.
+ */
+describe('notifications', () => {
+  let token
+
+  before(() => {
+    token = readFileSync(path.join(dataDir, 'notify-token'), 'utf8').trim()
+  })
+
+  const publish = (body) =>
+    page.request.post(`${BASE}/api/notify`, {
+      headers: { 'x-webmux-token': token },
+      data: body,
+    })
+
+  /**
+   * Waits for the event channel, which matters more than it looks.
+   *
+   * A notification published before the handshake completes is delivered as
+   * catch-up history, and history is filed without a toast — so a test that
+   * published straight away would fail for the right reason and look like the
+   * wrong one.
+   */
+  const waitForChannel = async () => {
+    await page.waitForFunction(() => window.__webmuxNotifications?.().status === 'ready', {
+      timeout: 20_000,
+    })
+  }
+
+  const snapshot = () => page.evaluate(() => window.__webmuxNotifications())
+
+  it('shows a toast for a notification and marks it on the bell', async () => {
+    await page.bringToFront()
+    await page.locator('header button:has-text("终端")').click()
+    await page.waitForSelector('.xterm', { timeout: 15_000 })
+    await waitForChannel()
+
+    const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json()
+    const target = sessions[0]
+    assert.ok(target, 'a session should exist by now')
+
+    const response = await publish({ title: '构建完成', body: '耗时 3m12s', sessionId: target.id })
+    assert.equal(response.status(), 201)
+
+    await page.waitForSelector('[data-notification-toast]', { timeout: 10_000 })
+    const toast = await page.textContent('[data-notification-toast]')
+    assert.match(toast, /构建完成/)
+    assert.match(toast, /耗时 3m12s/)
+
+    const badge = await page.textContent('[data-notification-badge]')
+    assert.equal(badge, '1')
+    assert.equal(await page.title(), '(1) webmux')
+  })
+
+  it('selects the session it came from when the toast is clicked', async () => {
+    const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json()
+    const target = sessions[0]
+    await waitForChannel()
+
+    await publish({ title: '另一条', sessionId: target.id, level: 'warn' })
+    // Matched by text, not by the attribute: `data-notification-toast` holds
+    // the notification's id, so a `*=` selector would compare against that.
+    await page.waitForSelector('[data-notification-toast]:has-text("另一条")', { timeout: 10_000 })
+
+    // The id, not just "a toast": the previous test's toast lives for six
+    // seconds, so anything less specific can match the wrong one.
+    const toastId = (await snapshot()).toasts.at(-1).id
+    await page.click(`[data-notification-toast="${toastId}"] button`)
+
+    // Selecting a session switches to the terminal view and puts its title in
+    // the header — the same thing clicking a row in the sidebar does.
+    await page.waitForFunction(
+      (title) => document.querySelector('header')?.textContent?.includes(title) === true,
+      target.title,
+      { timeout: 10_000 },
+    )
+    await page.waitForSelector(`[data-notification-toast="${toastId}"]`, {
+      state: 'detached',
+      timeout: 5_000,
+    })
+  })
+
+  it('lists history in the panel, and clears the badge', async () => {
+    await page.click('[data-notification-bell]')
+    await page.waitForSelector('[data-notification-panel]', { timeout: 10_000 })
+
+    const items = page.locator('[data-notification-item]')
+    assert.ok((await items.count()) >= 2, 'both notifications should be listed')
+
+    await page.click('[data-notification-read-all]')
+    await page.waitForFunction(() => window.__webmuxNotifications().unread === 0, { timeout: 10_000 })
+    await page.waitForSelector('[data-notification-badge]', { state: 'detached', timeout: 10_000 })
+    assert.equal(await page.title(), 'webmux')
+
+    // The read state is the server's, not just this tab's.
+    const listed = await (await page.request.get(`${BASE}/api/notifications?limit=10`)).json()
+    assert.equal(listed.unread, 0)
+
+    await page.keyboard.press('Escape')
+    await page.waitForSelector('[data-notification-panel]', { state: 'detached', timeout: 10_000 })
+  })
+
+  it('survives a reload without announcing everything again', async () => {
+    await waitForChannel()
+    await publish({ title: '刷新之后', level: 'error' })
+    await page.waitForSelector('[data-notification-toast]:has-text("刷新之后")', { timeout: 10_000 })
+    await page.waitForFunction(() => window.__webmuxNotifications().unread === 1, { timeout: 10_000 })
+
+    await page.reload()
+    await page.waitForSelector('.xterm', { timeout: 20_000 })
+    await waitForChannel()
+
+    // Nothing is announced a second time: the cursor recorded what this
+    // browser had already seen, so the reload is not a fresh set of news.
+    const state = await snapshot()
+    assert.equal(state.unread, 1, 'the badge comes from the server, not from memory')
+    assert.equal(state.toasts.length, 0, 'and nothing was re-announced')
+
+    // The list itself is fetched when the panel is opened, rather than every
+    // tab keeping a copy warm — so it is empty here and populated there.
+    await page.click('[data-notification-bell]')
+    await page.waitForSelector('[data-notification-item]', { timeout: 10_000 })
+    assert.match(await page.textContent('[data-notification-panel]'), /刷新之后/)
+    await page.keyboard.press('Escape')
+  })
 })

@@ -241,11 +241,13 @@ describe('authentication is required on every fs route', () => {
     ['GET', `/api/fs/list?path=${url('/')}`],
     ['GET', `/api/fs/stat?path=${url('/')}`],
     ['GET', `/api/fs/download?path=${url('/')}`],
+    ['GET', `/api/fs/download/root?path=${url('/')}`],
     ['POST', '/api/fs/mkdir'],
     ['POST', '/api/fs/rename'],
     ['DELETE', `/api/fs?path=${url('/')}`],
     ['GET', `/api/fs/preview?path=${url('/')}`],
     ['GET', `/api/fs/archive?path=${url('/')}`],
+    ['GET', `/api/fs/archive/root.zip?path=${url('/')}`],
     ['POST', '/api/fs/touch'],
     ['PUT', '/api/fs/content'],
     ['POST', '/api/fs/extract'],
@@ -504,6 +506,32 @@ describe('download', () => {
     // Chinese name is empty, so the extension alone would be a useless name.
     assert.match(disposition, /filename="download\.txt"/)
     assert.match(disposition, /filename\*=UTF-8''%E4%B8%AD%E6%96%87/)
+  })
+
+  it('serves the same bytes when the URL carries the filename', async () => {
+    // The trailing segment is a naming hint for clients that ignore
+    // Content-Disposition; it must not change what is served.
+    const target = path.join(HOME_ROOT, '中文 文件.txt')
+    const hinted = await fetch(
+      `${BASE}/api/fs/download/${url('中文 文件.txt')}?path=${url(target)}`,
+      { headers: headers() },
+    )
+    assert.equal(hinted.status, 200)
+    assert.equal(await hinted.text(), 'chinese')
+    assert.match(hinted.headers.get('content-disposition'), /filename\*=UTF-8''%E4%B8%AD%E6%96%87/)
+  })
+
+  it('never trusts the name in the URL when deciding what to serve', async () => {
+    // A URL that could deliver something other than what its last segment says
+    // is a URL that can lie about what it hands over. The hint is ignored: the
+    // path decides, and the response names the file it actually sent.
+    const res = await fetch(
+      `${BASE}/api/fs/download/${url('evil.exe')}?path=${url(path.join(HOME_ROOT, 'hello.txt'))}`,
+      { headers: headers() },
+    )
+    assert.equal(res.status, 200)
+    assert.equal(await res.text(), 'hello world')
+    assert.match(res.headers.get('content-disposition'), /filename="hello\.txt"/)
   })
 
   it('refuses a directory with a clear code', async () => {
@@ -1262,6 +1290,19 @@ describe('archive and extract', () => {
     assert.ok(Number(res.headers.get('x-webmux-entries')) >= 4)
 
     writeFileSync(archivePath, Buffer.from(await res.arrayBuffer()))
+  })
+
+  it('accepts the archive name as a URL segment and ignores it', async () => {
+    const target = path.join(HOME_ROOT, 'archived')
+    const res = await fetch(`${BASE}/api/fs/archive/${url('archived.zip')}?path=${url(target)}`, {
+      headers: headers(),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.headers.get('content-type'), 'application/zip')
+    assert.match(res.headers.get('content-disposition'), /filename="archived\.zip"/)
+    // A local-file header, so the response is a zip and not an error page
+    // wearing a zip's content type.
+    assert.equal(Buffer.from(await res.arrayBuffer()).subarray(0, 2).toString(), 'PK')
   })
 
   it('round-trips through extract, Chinese names included', async () => {

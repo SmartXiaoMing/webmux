@@ -33,13 +33,18 @@
  * is the single most valuable recon item an absolute-path leak hands over, and
  * the root name gives away the multi-root layout for no benefit at all.
  *
- * ## If you ever add a per-file download link
+ * ## Filenames in the download link
  *
- * Every filename currently reaches only a text node. The first per-file link
- * puts a filename into an `href` (where `escapeHtml` is the wrong tool and
- * `encodeURIComponent` is the right one) and possibly into a query parameter
- * that gets reflected. That change kills the invariant this file is built on;
- * the escaping rules have to be revisited with it.
+ * The download link now ends in the shared name (`/s/<token>/raw/<name>`), so
+ * a filename does reach an `href`. Two different escaping rules meet there and
+ * neither substitutes for the other: `encodeURIComponent` turns the name into
+ * a path segment (and decodes back to itself), while `escapeHtml` makes the
+ * resulting URL safe in an attribute. A filename is attacker-influenced, so it
+ * goes through both, in that order.
+ *
+ * The segment is only a naming hint — the server ignores it — but it is the
+ * one the visitor's client sees, so it must still be escaped as if it were
+ * load-bearing.
  */
 
 /** How many directory entries a share page will list. */
@@ -179,12 +184,28 @@ ${notice === '' ? '' : `    ${notice}\n`}    <form method="post" action="/s/${co
   )
 }
 
+/**
+ * The download link, with the filename as the URL's last segment.
+ *
+ * The server ignores that segment: it exists because clients that discard
+ * `Content-Disposition` (Android's download manager, in-app browsers) name the
+ * saved file after the URL instead, which without it turns every share into
+ * `raw.bin`. `encodeURIComponent` is what makes the name a legal path segment;
+ * the token is already constrained to `[A-Za-z0-9_-]` by `SHARE_TOKEN_PATTERN`.
+ */
+function rawHref(context: PageContext, name: string): string {
+  const href = `/s/${context.token}/raw/${encodeURIComponent(name)}`
+  // Encoded once for the URL, escaped once for the attribute. Different
+  // layers, different rules — see the header.
+  return escapeHtml(href)
+}
+
 export function renderFilePage(context: PageContext, size: number, mtimeMs: number): string {
   return shell(
     context.name,
     `    <h1>${escapeHtml(displayName(context.name))}</h1>
     <p class="meta">${formatBytes(size)} · ${formatTime(mtimeMs)}</p>
-    <a class="button" href="/s/${context.token}/raw">下载</a>`,
+    <a class="button" href="${rawHref(context, context.name)}">下载</a>`,
   )
 }
 
@@ -211,7 +232,7 @@ export function renderDirectoryPage(
     context.name,
     `    <h1>${escapeHtml(displayName(context.name))}</h1>
     <p class="meta">目录分享 · ${entries.length}${totalIsCapped ? '+' : ''} 项</p>
-    <a class="button" href="/s/${context.token}/raw">打包下载 (zip)</a>
+    <a class="button" href="${rawHref(context, `${context.name}.zip`)}">打包下载 (zip)</a>
 ${capped}
     <table>
       <thead><tr><th>名称</th><th class="size">大小</th><th class="size">修改时间</th></tr></thead>

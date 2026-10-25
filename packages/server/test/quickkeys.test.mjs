@@ -29,7 +29,10 @@ function freshStore() {
 
 describe('quick key store', () => {
   it('applies migration 4', () => {
-    assert.equal(db.pragma('user_version', { simple: true }), 4)
+    // "At least", not "exactly": what this is checking is that the migration
+    // creating this table ran, and pinning the exact cursor would make every
+    // later migration fail this test for no reason.
+    assert.ok(db.pragma('user_version', { simple: true }) >= 4)
   })
 
   it('creates and lists', () => {

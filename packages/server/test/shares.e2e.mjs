@@ -183,6 +183,29 @@ describe('a public link needs no cookie', () => {
     assert.match(res.headers.get('content-type'), /^text\/plain/)
   })
 
+  it('puts the filename in the download link', async () => {
+    // For clients that ignore Content-Disposition: they name the saved file
+    // after the URL's last segment, and `/raw` alone would make that `raw.bin`.
+    const html = await (await anon(`/s/${share.token}`)).text()
+    const wanted = `/s/${share.token}/raw/${encodeURIComponent('hello.txt')}`
+    assert.ok(html.includes(wanted), `the page should link ${wanted}`)
+  })
+
+  it('serves the same bytes from the name-carrying URL', async () => {
+    const res = await anon(`/s/${share.token}/raw/${encodeURIComponent('hello.txt')}`)
+    assert.equal(res.status, 200)
+    assert.equal(await res.text(), 'hello from a share')
+    assert.equal(res.headers.get('cache-control'), 'no-store')
+    // The suffix is a naming hint; the inline decision is still the payload's.
+    assert.match(res.headers.get('content-disposition'), /^inline/)
+  })
+
+  it('never trusts the name in the URL when deciding what to serve', async () => {
+    const res = await anon(`/s/${share.token}/raw/${encodeURIComponent('evil.exe')}`)
+    assert.equal(res.status, 200)
+    assert.equal(await res.text(), 'hello from a share')
+  })
+
   it('falls back to an attachment for a type it will not render', async () => {
     const binary = path.join(root, 'blob.bin')
     writeFileSync(binary, Buffer.from([0, 1, 2, 3]))
@@ -478,8 +501,11 @@ describe('directory shares', () => {
     assert.ok(html.includes('inner.txt'))
     assert.ok(html.includes('中文 文件.txt'))
     assert.ok(html.includes('打包下载'))
+    // The zip's name is the shared directory's, matching what the response's
+    // Content-Disposition says — and what a client that ignores it will save.
+    assert.ok(html.includes(`/s/${share.token}/raw/${encodeURIComponent('folder.zip')}`))
 
-    const raw = await anon(`/s/${share.token}/raw`)
+    const raw = await anon(`/s/${share.token}/raw/${encodeURIComponent('folder.zip')}`)
     assert.equal(raw.status, 200)
     assert.equal(raw.headers.get('content-type'), 'application/zip')
     assert.equal(raw.headers.get('x-content-type-options'), 'nosniff')

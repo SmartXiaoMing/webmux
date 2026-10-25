@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PlacesResponse, QuickKey, SessionSummary } from '@webmux/shared'
 import { ApiError, api } from './lib/api'
 import { useUploadTasks } from './lib/upload'
@@ -14,6 +14,9 @@ import { FavoritesSection, RecentSection } from './features/places/PlacesPanel'
 import { ShareList } from './features/shares/ShareList'
 import { TerminalView } from './features/terminal/TerminalView'
 import { QuickKeysDialog } from './features/terminal/QuickKeysDialog'
+import { NotificationPanel } from './features/notifications/NotificationPanel'
+import { NotificationToasts } from './features/notifications/NotificationToasts'
+import { notifications } from './lib/notifications'
 
 type AuthState =
   | { kind: 'loading' }
@@ -58,7 +61,40 @@ export function App(): React.JSX.Element {
     return <AuthPage mode={auth.kind} onAuthenticated={() => setAuth({ kind: 'ready' })} />
   }
 
-  return <Workspace onSignOut={() => setAuth({ kind: 'login' })} />
+  return (
+    <Workspace
+      onSignOut={() => {
+        // Signed out on purpose or by an expired session: either way the next
+        // person at this browser must not inherit the badge, the list, or the
+        // reconnect cursor.
+        notifications.reset()
+        setAuth({ kind: 'login' })
+      }}
+    />
+  )
+}
+
+/**
+ * A session id from the URL, for a notification opened from the OS.
+ *
+ * The service worker cannot reach into a running tab and select something, so
+ * a click asks for `/?session=<id>` and this is the other half of that
+ * contract. Read once, at mount, rather than on every change: the parameter is
+ * consumed and then removed from the URL.
+ */
+function readSessionParam(): string | null {
+  try {
+    const value = new URLSearchParams(window.location.search).get('session')
+    return value === null || value === '' ? null : value
+  } catch {
+    return null
+  }
+}
+
+function dropSessionParam(): void {
+  const url = new URL(window.location.href)
+  url.searchParams.delete('session')
+  window.history.replaceState(null, '', url)
 }
 
 function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element {
@@ -133,6 +169,25 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
     void refreshQuickKeys()
   }, [refreshQuickKeys])
 
+  /**
+   * Clicking a notification: land on the terminal it came from.
+   *
+   * The session may have been closed since the notification was sent — the id
+   * is whatever the caller passed to `webmux notify` — so an unknown one is
+   * ignored rather than selected. Selecting it would show the "no terminals
+   * open" screen and then quietly bounce the user to a different terminal on
+   * the next poll.
+   */
+  const openSession = useCallback(
+    (sessionId: string) => {
+      if (!sessions.some((s) => s.id === sessionId)) return
+      setActiveId(sessionId)
+      setView('terminal')
+      setSidebarOpen(false)
+    },
+    [sessions],
+  )
+
   const openDirectory = useCallback((path: string) => {
     setView('files')
     setSidebarOpen(false)
@@ -143,12 +198,30 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
   // not sleep.
   useWakeLock(activeId !== null)
 
+  /**
+   * A session requested through `?session=` — from a notification the service
+   * worker opened in a fresh tab. Consumed on the first successful load, since
+   * the id cannot be validated before the list exists.
+   */
+  const pendingSession = useRef<string | null>(readSessionParam())
+
   const refresh = useCallback(async (): Promise<void> => {
     try {
       const list = await api.listSessions()
       setSessions(list)
       setError(null)
-      // Keep a valid selection as sessions come and go.
+
+      const wanted = pendingSession.current
+      pendingSession.current = null
+      if (wanted !== null && list.some((s) => s.id === wanted)) {
+        setActiveId(wanted)
+        setView('terminal')
+        dropSessionParam()
+      }
+
+      // Keep a valid selection as sessions come and go. Runs after the line
+      // above, so a session just selected from the URL survives: it is in the
+      // list, which is the whole test this applies.
       setActiveId((current) => {
         if (current && list.some((s) => s.id === current)) return current
         return list[0]?.id ?? null
@@ -172,6 +245,22 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
       window.removeEventListener('focus', onFocus)
     }
   }, [refresh])
+
+  // The notification stream lives exactly as long as the authenticated view.
+  // Opening it from the app root instead would mean reconnecting against a 401
+  // for as long as the login screen is up.
+  useEffect(() => {
+    void notifications.start()
+    return () => notifications.stop()
+  }, [])
+
+  // A notification clicked while the app is already open arrives as a message
+  // from the service worker rather than as a navigation, so that selecting the
+  // session does not cost a reload of every terminal on screen.
+  useEffect(() => {
+    notifications.setSessionOpener(openSession)
+    return () => notifications.setSessionOpener(null)
+  }, [openSession])
 
   const createSession = useCallback(
     async (cwd: string, parentId?: string): Promise<void> => {
@@ -348,6 +437,13 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
           )}
 
           {/*
+            Before the view switcher, so it keeps its place as views change —
+            and in the header rather than the sidebar, which is a drawer on a
+            phone and would hide the unread badge behind a tap.
+          */}
+          <NotificationPanel onOpenSession={openSession} />
+
+          {/*
             Desktop switches views here; phones use the tab bar below. Same
             icons as the tab bar — one icon per view, not per breakpoint.
           */}
@@ -452,6 +548,13 @@ function Workspace({ onSignOut }: { onSignOut: () => void }): React.JSX.Element 
           onSignOut={onSignOut}
         />
       )}
+
+      {/*
+        Last, so a toast paints over the views and their overlays. Anchored to
+        this box rather than portalled for the same reason the dialogs are: it
+        tracks `visualViewport`, so a phone's keyboard cannot push it away.
+      */}
+      <NotificationToasts onOpenSession={openSession} />
     </div>
   )
 }

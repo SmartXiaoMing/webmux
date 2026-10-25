@@ -16,6 +16,7 @@ import type { Config } from '../config'
 import { logger } from '../logger'
 import type { SessionRegistry } from '../terminal/registry'
 import type { Session, SessionClient } from '../terminal/session'
+import { originAllowed } from './origin'
 
 const log = logger.child('ws')
 
@@ -99,32 +100,6 @@ export interface GatewayContext {
   registry: SessionRegistry
   auth: AuthContext
   config: Config
-}
-
-/**
- * Validates the Origin header on upgrade.
- *
- * This check is not optional. WebSocket upgrades are **not** subject to CORS or
- * the same-origin policy, so a page on any origin can open a socket to this
- * server, and the browser will attach the session cookie to the handshake.
- * Without an Origin check that is a cross-site WebSocket hijacking hole
- * straight into a shell.
- *
- * A missing Origin means the client is not a browser (browsers always send it
- * for WebSocket), so the cookie still has to be valid on its own merits.
- */
-function originAllowed(req: FastifyRequest, config: Config): boolean {
-  const origin = req.headers.origin
-  if (!origin) return true
-  if (config.allowedOrigins.includes(origin)) return true
-
-  const host = req.headers.host
-  if (!host) return false
-  try {
-    return new URL(origin).host === host
-  } catch {
-    return false
-  }
 }
 
 export function registerTerminalGateway(app: FastifyInstance, ctx: GatewayContext): void {

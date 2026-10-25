@@ -1,4 +1,5 @@
 import { readFileSync, existsSync, mkdirSync } from 'node:fs'
+import net from 'node:net'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
@@ -81,6 +82,34 @@ const fileSchema = z.object({
       inlinePreview: z.boolean().optional(),
     })
     .optional(),
+  /** Notifications: a local-only ingress plus delivery to browsers and phones. */
+  notify: z
+    .strictObject({
+      enabled: z.boolean().optional(),
+      /** How long a notification is kept before the sweep removes it. */
+      retentionDays: z.number().int().min(1).max(3650).optional(),
+      /** Ceiling on stored rows, so a runaway script cannot grow the database. */
+      maxStored: z.number().int().min(10).max(100_000).optional(),
+      /** Ingest limit per minute. 0 disables it; see notify/hub.ts for why that is unwise. */
+      perMinute: z.number().int().min(0).max(10_000).optional(),
+      /** Extra source CIDRs accepted by the local-only route. */
+      allowFrom: z
+        .array(
+          z.string().refine((v) => parseCidr(v) !== null, {
+            message: 'expected an IP address or CIDR, e.g. 172.17.0.0/16',
+          }),
+        )
+        .max(32)
+        .optional(),
+      push: z
+        .strictObject({
+          enabled: z.boolean().optional(),
+          /** VAPID `sub`: who a push service should contact about this sender. */
+          subject: z.string().min(1).max(256).optional(),
+        })
+        .optional(),
+    })
+    .optional(),
   /** File browser. Omit entirely to browse `$HOME`. */
   files: z
     .strictObject({
@@ -116,6 +145,15 @@ const envSchema = z.object({
   WEBMUX_SHARES_DEFAULT_TTL_HOURS: z.coerce.number().int().min(1).max(24 * 365).optional(),
   WEBMUX_SHARES_MAX_ACTIVE: z.coerce.number().int().min(0).max(10_000).optional(),
   WEBMUX_SHARES_DEFAULT_RATE_LIMIT: z.coerce.number().int().min(0).optional(),
+  WEBMUX_NOTIFY_ENABLED: z
+    .enum(['1', 'true', 'yes', '0', 'false', 'no'])
+    .transform((v) => v === '1' || v === 'true' || v === 'yes')
+    .optional(),
+  WEBMUX_NOTIFY_PUSH_ENABLED: z
+    .enum(['1', 'true', 'yes', '0', 'false', 'no'])
+    .transform((v) => v === '1' || v === 'true' || v === 'yes')
+    .optional(),
+  WEBMUX_NOTIFY_PER_MINUTE: z.coerce.number().int().min(0).optional(),
   WEBMUX_CONFIG: z.string().optional(),
 })
 
@@ -165,6 +203,114 @@ export function isLoopbackHost(host: string): boolean {
   if (trimmed === '::1') return true
   // The whole 127/8 block, not just 127.0.0.1.
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(trimmed)
+}
+
+/** Loopback, in the two families, as something Node can match against. */
+const LOOPBACK_BLOCKS = ((): net.BlockList => {
+  const list = new net.BlockList()
+  list.addSubnet('127.0.0.0', 8, 'ipv4')
+  list.addAddress('::1', 'ipv6')
+  return list
+})()
+
+/**
+ * Whether an address is in a block list, or false when it cannot be read.
+ *
+ * A BlockList does the two things that are easy to get wrong by hand: an IPv4
+ * peer of a dual-stack listener arrives as `::ffff:127.0.0.1` — or, on some
+ * platforms, in hex as `::ffff:7f00:1` — and `0:0:0:0:0:0:0:1` is the same
+ * address as `::1`. Node matches all three against the IPv4/IPv6 rules of the
+ * list without any rewriting here, which is the whole reason for using it.
+ * That claim is load-bearing and is pinned by a test in security.test.mjs.
+ *
+ * Anything unparseable, and `undefined`, is refused: every case where the
+ * address cannot be read is a case where the caller is not provably local.
+ */
+export function addressAllowed(list: net.BlockList, address: string | undefined): boolean {
+  if (address === undefined) return false
+  const trimmed = address.trim()
+  if (trimmed === '') return false
+  const family = trimmed.includes(':') ? 'ipv6' : 'ipv4'
+  if (family === 'ipv4' ? !net.isIPv4(trimmed) : !net.isIPv6(trimmed)) return false
+  return list.check(trimmed, family)
+}
+
+/**
+ * Whether a **peer** address is this machine.
+ *
+ * Deliberately not `isLoopbackHost` above: that one classifies a configured
+ * *listen* address and so accepts `localhost`, which a socket peer never is.
+ * Different question, different input, different answer for the same string.
+ */
+export function isLoopbackAddress(address: string | undefined): boolean {
+  return addressAllowed(LOOPBACK_BLOCKS, address)
+}
+
+/**
+ * Splits an `allowFrom` entry into what `net.BlockList.addSubnet` wants, or
+ * null when it is not an address.
+ *
+ * A bare address is accepted and treated as a host route, because requiring
+ * the suffix would make the common case — one container gateway — needlessly
+ * ceremonial.
+ */
+export function parseCidr(
+  entry: string,
+): { address: string; prefix: number; type: 'ipv4' | 'ipv6' } | null {
+  const parts = entry.split('/')
+  const address = parts[0]
+  if (address === undefined || address === '' || parts.length > 2) return null
+
+  const isV6 = net.isIPv6(address)
+  if (!isV6 && !net.isIPv4(address)) return null
+  const type: 'ipv4' | 'ipv6' = isV6 ? 'ipv6' : 'ipv4'
+  const full = isV6 ? 128 : 32
+
+  const text = parts[1]
+  if (text === undefined) return { address, prefix: full, type }
+
+  // Digits only, before any conversion. `Number('')` is 0 and `Number('0x10')`
+  // is 16, so a trailing slash — `"10.0.0.0/"`, an unset shell variable, a
+  // typo — would silently become `10.0.0.0/0`: a route matching the entire
+  // internet, which switches off both the peer check and the forwarded-chain
+  // check and leaves the token alone in front of the ingress.
+  if (!/^\d{1,3}$/.test(text)) return null
+
+  const prefix = Number(text)
+  if (prefix < 0 || prefix > full) return null
+  // A host route of zero bits is never what an operator means by "also allow
+  // these", and it is the shape the typo above produces. Refusing it turns a
+  // silently-disabled check into a startup error.
+  if (prefix === 0) return null
+  return { address, prefix, type }
+}
+
+/**
+ * The source addresses `POST /api/notify` accepts.
+ *
+ * Loopback is always in, and IPv4-mapped IPv6 peers match the IPv4 rules —
+ * verified, not assumed. `allowFrom` covers the two shapes where the caller is
+ * genuinely local but its source address is not loopback: a bind to one
+ * specific non-loopback address, and a container reaching the host through the
+ * bridge gateway. Both are cases where the alternative is a route nobody can
+ * call. Opening them up does not weaken the route much, because the token is
+ * still required and a browser still cannot send these requests at all.
+ */
+export function buildNotifyAllowList(allowFrom: string[]): net.BlockList {
+  const list = new net.BlockList()
+  list.addSubnet('127.0.0.0', 8, 'ipv4')
+  list.addAddress('::1', 'ipv6')
+
+  for (const entry of allowFrom) {
+    const parsed = parseCidr(entry)
+    if (parsed === null) throw new Error(`invalid notify.allowFrom entry: ${entry}`)
+    if (parsed.prefix === (parsed.type === 'ipv6' ? 128 : 32)) {
+      list.addAddress(parsed.address, parsed.type)
+    } else {
+      list.addSubnet(parsed.address, parsed.prefix, parsed.type)
+    }
+  }
+  return list
 }
 
 /**
@@ -240,6 +386,52 @@ export function forwardedHeaderWarning(host: string, trustProxy: boolean): strin
   )
 }
 
+/**
+ * The warning for a deployment where "local only" has stopped meaning local,
+ * or null when there is nothing to say.
+ *
+ * `POST /api/notify` decides whether a caller is on this machine from the
+ * socket peer address, because `req.ip` is precisely the value a client can
+ * forge (see `forwardedHeaderWarning` above). That test is sound, and it is
+ * why the route also requires a bearer token and refuses any request carrying
+ * an `Origin` header.
+ *
+ * What the address test cannot survive is a reverse proxy on the same host:
+ * everything the proxy forwards, from anywhere, arrives with a loopback peer.
+ * The route additionally requires every hop of a forwarded chain to be
+ * loopback, which catches the usual `$proxy_add_x_forwarded_for` setup — but a
+ * proxy that sends no X-Forwarded-For at all leaves the token as the only
+ * thing between the route and anyone who can reach the instance.
+ *
+ * Keyed on `trustProxy` rather than on the bind address because that flag is
+ * the operator's own statement that a proxy is in front. Warning on every
+ * non-loopback bind instead would fire for the default `0.0.0.0` and be tuned
+ * out by everyone it matters to.
+ */
+export function notifyProxyWarning(host: string, trustProxy: boolean): string | null {
+  if (!trustProxy || isLoopbackHost(host)) return null
+  return (
+    `trustProxy is on, so a reverse proxy is forwarding to this instance: every ` +
+    `proxied request reaches /api/notify with a loopback peer address, and its ` +
+    `"local only" check therefore rests on the notify token alone. That is still ` +
+    `a secret a web page cannot read, but if this port is reachable from a network ` +
+    `you do not control, set notify.enabled=false or keep the token out of reach.`
+  )
+}
+
+export interface NotifyConfig {
+  enabled: boolean
+  retentionDays: number
+  maxStored: number
+  /** 0 disables the ingest rate limit. */
+  perMinute: number
+  allowFrom: string[]
+  push: {
+    enabled: boolean
+    subject: string
+  }
+}
+
 export interface Config {
   host: string
   port: number
@@ -254,6 +446,7 @@ export interface Config {
   allowedOrigins: string[]
   files: FilesConfig
   shares: SharesConfig
+  notify: NotifyConfig
   configFile: string | null
 }
 
@@ -320,6 +513,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       })) ?? [{ name: 'home', path: homedir(), readonly: false }],
       uploadTtlHours: file.files?.uploadTtlHours ?? 24,
       maxUploadBytes: file.files?.maxUploadBytes ?? null,
+    },
+    notify: {
+      enabled: e.WEBMUX_NOTIFY_ENABLED ?? file.notify?.enabled ?? true,
+      retentionDays: file.notify?.retentionDays ?? 30,
+      maxStored: file.notify?.maxStored ?? 500,
+      // A rate limit is the only thing protecting the browser and the push
+      // service from a script that calls in a loop, so it is on by default.
+      perMinute: e.WEBMUX_NOTIFY_PER_MINUTE ?? file.notify?.perMinute ?? 30,
+      allowFrom: file.notify?.allowFrom ?? [],
+      push: {
+        enabled: e.WEBMUX_NOTIFY_PUSH_ENABLED ?? file.notify?.push?.enabled ?? true,
+        // Some push services reject a `sub` that is not a contact address, and
+        // the RFC allows either a mailto: or an https: URL. It never receives
+        // mail; it exists so an operator of a push service can reach whoever
+        // runs this instance about a misbehaving sender.
+        subject: file.notify?.push?.subject ?? 'mailto:webmux@localhost',
+      },
     },
     shares: {
       enabled: e.WEBMUX_SHARES_ENABLED ?? file.shares?.enabled ?? true,
